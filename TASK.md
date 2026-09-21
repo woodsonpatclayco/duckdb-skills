@@ -137,21 +137,35 @@ FAIL**, even though it returns data.
 '$.tool_result.sqldata')` returns 0 rows corpus-wide; cause not diagnosed. **Do not
 build on `sqldata`** — use the CSV text path above.
 
-### 7. Every session has a metadata sidecar — 393/393
+### 7. Every session has a metadata sidecar — but sidecars come in TWO SHAPES
 
-Beside each `<id>.history.jsonl` sits `<id>.json`. Verified present for **all 393**
-sessions. Fields include:
+Beside each `<id>.history.jsonl` sits `<id>.json`. Present for every session, but the
+field names differ by level and **only `session_id`, `title`, and `working_directory`
+exist in both shapes**:
 
+| Shape | Count | Timestamp fields |
+|---|---|---|
+| top-level sidecars | ~37 | `created_at`, `last_updated` (ISO strings); also `git_root`, `git_branch` |
+| sub-level sidecars | ~356 | `creationDate`, `lastMessageDate` (**epoch milliseconds, BIGINT**); no `created_at`, no git fields |
+
+Measured: of 428 parseable `.json` files, **39 have `created_at` and 389 do not.**
+Assuming `created_at` corpus-wide loses 90% of sessions.
+
+Read sidecars with an explicit columns list covering both shapes:
+
+```sql
+columns = {session_id: 'VARCHAR', title: 'VARCHAR', working_directory: 'VARCHAR',
+           created_at: 'VARCHAR', creationDate: 'BIGINT'}
 ```
-session_id, title, connection_name, working_directory, git_root, git_branch,
-created_at, last_updated
-```
 
-Example: `working_directory = C:\Users\woodsonp\Claude\Dev\project-miner-reports`,
-`git_branch = master`, `created_at = 2026-08-20T17:41:16.766Z`.
+Join sidecars via a second `read_json` over the same two glob levels (`*.json`),
+matching `session_id` to the history filename stem. The `.json` glob returns ~428
+files — more than the ~394 history files — so let unmatched sidecars drop. **Do not
+assert a 1:1 count.**
 
-Join sidecars via a second `read_json` over the same two glob levels (`.json`,
-excluding `*.history.jsonl`), matching `session_id` to the history filename stem.
+`working_directory` is stored with a **lowercase drive letter** (`c:\Users\...`) while
+PowerShell's `$PWD.Path` renders `C:`. Any comparison must be case-insensitive and
+separator-normalised.
 
 **This makes `--here` supportable** — compare `working_directory` to the current
 directory. **Never fall back to the containing folder name as a project identifier:**
@@ -169,8 +183,14 @@ holds 20 unrelated sessions.
 a naive implementation shows a blank timestamp on most rows.
 
 **Required behaviour:** derive and display
-`ts = coalesce(user_sent_time, assistant_sent_time, <sidecar created_at>)`.
-Never return a blank timestamp. Order by the same expression.
+
+```sql
+ts = coalesce(user_sent_time::TIMESTAMP, assistant_sent_time::TIMESTAMP,
+              created_at::TIMESTAMP, epoch_ms(creationDate))
+```
+
+Both sidecar terms are required per finding 7 — `created_at` alone is NULL for ~90% of
+sessions. Never return a blank timestamp. Order by the same expression.
 
 ### 9. Windows and shell specifics
 
@@ -192,18 +212,40 @@ Never return a blank timestamp. Order by the same expression.
 1. Rewrite `skills/read-memories/SKILL.md` to search Cortex Code logs at **both**
    glob levels, reading `content` as JSON per finding 4.
 2. Ship `skills/read-memories/search.sql`, invoked via `duckdb -csv -f`. Runtime
-   values pass through environment variables read by `getenv()`, named
-   **`DSK_KEYWORD`** and **`DSK_MODE`**. SKILL.md must show the literal PowerShell
-   invocation the **agent** runs (the user never sets these):
+   values pass through **three** environment variables read by `getenv()`:
+   **`DSK_KEYWORD`**, **`DSK_MODE`**, and **`DSK_CWD`**. `DSK_CWD` exists because a
+   `.sql` file run under `-f` has no way to learn the working directory — DuckDB
+   exposes no cwd function and `$PWD` is not an environment variable. When `--here`
+   is absent the agent sets `DSK_CWD` to the empty string and the SQL applies no
+   directory filter.
+
+   `DSK_MODE` takes exactly three values:
+
+   | value | behaviour |
+   |---|---|
+   | `search` | keyword search (requirements 4-7) |
+   | `sqlresults` | recover past SQL result sets (requirement 8) |
+   | `coverage` | emit a single `distinct_files` count from the skill's own `read_ndjson` call (check A1) |
+
+   Any other value must print `unknown DSK_MODE` and exit non-zero.
+
+   SKILL.md must show the literal PowerShell invocation the **agent** runs (the user
+   never sets these):
    ```powershell
-   $env:DSK_KEYWORD = '<keyword>'; $env:DSK_MODE = 'search'
+   $env:DSK_KEYWORD = '<keyword>'; $env:DSK_MODE = 'search'; $env:DSK_CWD = $PWD.Path
    duckdb -csv -f "<abs path>\skills\read-memories\search.sql"
    ```
 3. Document how the **user** invokes the skill, in the form already used at
    `README.md:74` (`/duckdb-skills:read-memories <keyword> [--here]`). The current
    skill's `argument-hint` is being removed (requirement 9), so the invocation
    contract must be restated in the body.
-4. Exclude `<system-reminder>` blocks from text results by default.
+4. Exclude `<system-reminder>` blocks from text results by default. Keyword search
+   mode reads **only blocks whose `type` is `text`** — `tool_use`, `tool_result`,
+   `thinking`, and `image` blocks are excluded from search mode entirely. (Measured
+   for keyword `Project Miner`: 186 `tool_result`, 112 `tool_use`, 22 `text`, 6
+   `thinking`. Including tool blocks floods the output with CSV dumps and re-admits
+   quoted `<system-reminder>` text, failing requirements 6 and 4.) Past tool results
+   are reachable only through the recovery mode of requirement 8.
 5. Exclude `thinking` blocks from results by default (internal reasoning, not
    decisions).
 6. Return per hit: session id (from filename), `ts` per finding 8, `role`, and a
@@ -226,8 +268,9 @@ Never return a blank timestamp. Order by the same expression.
   files exist at `~/.claude/projects/`; out of scope.)
 - Do **not** diagnose the `sqldata` mystery (finding 6). Note it and move on.
 - Do **not** touch `README.md`. If your change makes it stale — it documents
-  `read-memories` at lines 70-74 and claims it uses `duckdb-docs` at line 125 — say
-  which lines in `RESULT-1.md` and stop.
+  `read-memories` at lines 70-74 and claims it uses `duckdb-docs` at line 125 — name
+  the stale line numbers in `RESULT-1.md` and make no change to `README.md`. This
+  does not block completion of the rest of the task.
 - Do **not** use, create, or write to `state.sql`. `read-memories` deliberately stays
   outside the shared state convention: it reads a fixed absolute path and needs no
   attached database.
@@ -247,11 +290,17 @@ Run from `C:\Users\woodsonp\Claude\Dev\duckdb-skills`. `RESULT-1.md` must quote 
 **A1 — corpus fully covered (catches the 37-file miss)**
 
 Count distinct files from **inside the skill's own `read_ndjson` call** — not from
-`Get-ChildItem`. A file DuckDB skips is not covered.
+`Get-ChildItem`. A file DuckDB skips is not covered. This is what `coverage` mode
+exists for (requirement 2); do not run an ad-hoc query.
+
+```powershell
+$env:DSK_MODE = 'coverage'; $env:DSK_KEYWORD = ''; $env:DSK_CWD = ''
+duckdb -csv -f "<abs path>\skills\read-memories\search.sql"
+```
 
 ```
-Expected: >= 393 distinct files, AND strictly greater than the sub-level-only
-count (356 at time of writing).
+Expected: a single `distinct_files` value >= 394, AND strictly greater than the
+sub-level-only count (357 at time of writing).
 A result equal to the sub-level count alone means the top-level glob is
 missing → FAIL.
 ```
@@ -277,6 +326,12 @@ readable prose.
 If a snippet looks like {'type': 'text', 'text': ...} → FAIL.
 ```
 
+Margin warning: only **3** `text` blocks corpus-wide contain this token, of which
+**2** are clean (non-system-reminder). Both must be returned. Search mode must **not**
+filter by `role`, dedupe by session, or require a non-NULL raw timestamp — each of
+those takes this check to zero. If it returns 0 rows the cause is over-filtering, not
+a missing corpus.
+
 **A4 — known-absent keyword returns cleanly (control)**
 
 Keyword `zzqqxx-not-a-real-token`:
@@ -288,13 +343,30 @@ This is a control — it passes on any non-crashing build.
 
 **A5 — SQL result recovery covers BOTH tool names**
 
-Run the recovery mode:
+Two invocations.
+
+**A5a — coverage of both tool names:**
+
+```powershell
+$env:DSK_MODE = 'sqlresults'; $env:DSK_KEYWORD = ''; $env:DSK_CWD = ''
+duckdb -csv -f "<abs path>\skills\read-memories\search.sql"
+```
 
 ```
-Expected: >= 1,175 sql result blocks total, of which >= 1,029 contain
-"row(s) returned".
-A result of 56 / 50 means only the legacy `sql_execute` name was matched → FAIL.
-Then show ONE recovered result set as CSV including its column header line.
+Expected: a `total,with_rows_returned` line with total >= 1,175 and
+with_rows_returned >= 1,029 (floors — higher is expected drift).
+A result of 56,50 means only the legacy `sql_execute` name was matched → FAIL.
+```
+
+**A5b — one result set actually rendered:**
+
+Re-run `sqlresults` with `DSK_KEYWORD` set to any token present in one recovered
+result.
+
+```
+Expected: at least one recovered result whose text contains a comma-delimited
+header line followed by data rows and a line matching "N row(s) returned".
+Paste the full block in RESULT-1.md, and the keyword used.
 ```
 
 **A6 — no struct-key or missing-column failures anywhere**
@@ -308,12 +380,24 @@ State explicitly, per check A1-A5, whether it ran, and paste its output.
 **A7 — blast radius contained (two commands)**
 
 ```
-git diff --stat upstream/main -- . ":(exclude)skills/read-memories"
+git diff --stat upstream/main -- . ":(exclude)skills/read-memories" ":(exclude)TASK.md" ":(exclude)RESULT-1.md" ":(exclude).cortex-plugin"
 Expected: EMPTY output.
-
-git status --short
-Expected: exactly `?? RESULT-1.md` and `?? .cortex-plugin/`. Nothing else.
 ```
+
+`TASK.md` and `.cortex-plugin/plugin.json` are Cortex-fork additions already committed
+on this branch and legitimately absent from `upstream/main`; they are excluded
+deliberately, not overlooked. Without those exclusions this check fails on an
+untouched repo.
+
+```
+git status --short
+Expected: exactly one line, `?? RESULT-1.md`. Nothing else.
+```
+
+`.cortex-plugin/plugin.json` is **tracked and committed**, so it can never appear as
+`??` — do not `git rm` it to satisfy this check. The tree is clean at the start of this
+task, and requirement 11 commits `SKILL.md` and `search.sql` before `RESULT-1.md` is
+written, so `RESULT-1.md` is the only untracked artifact.
 
 **A8 — no relative-path assumptions**
 
@@ -326,12 +410,17 @@ a number written in this spec — compare the two runs to each other).
 
 **A9 — thinking blocks excluded**
 
-Keyword `Project Miner`:
+Assert the mechanism, not the side-effect. `thinking` prose lives at `$.thinking`, not
+`$.text`, so an implementation that matches on `$.text` excludes thinking blocks
+*incidentally* — this check must not pass on that accident.
 
 ```
-Expected: ZERO returned rows are `thinking` blocks. `thinking` is the largest
-excludable category (9,618 blocks), so an implementation that forgets
-requirement 5 still passes A1-A8.
+Select-String -Pattern "\$\.type" skills\read-memories\search.sql
+Expected: an explicit block-type filter (e.g. json_extract_string(c,'$.type') = 'text').
+Absence of an explicit type filter → FAIL, even if output happens to be clean.
+
+Then keyword `Project Miner`: ZERO returned rows are `thinking` blocks (6 thinking
+blocks in the corpus contain that phrase; none may appear).
 ```
 
 **A10 — frontmatter is Cortex-correct**
@@ -344,10 +433,30 @@ No `argument-hint`. No `allowed-tools`. The description names Cortex Code.
 
 **A11 — `--here` actually scopes**
 
-Run with `--here` from `C:\Users\woodsonp\Claude\Dev\duckdb-skills`:
+Run with `--here` from `C:\Users\woodsonp\Claude\Dev\duckdb-skills`, i.e.
+`$env:DSK_CWD = $PWD.Path`.
+
+Compare case-insensitively with separators normalised:
+`lower(replace(working_directory,'/','\')) = lower(replace(getenv('DSK_CWD'),'/','\'))`.
 
 ```
-Expected: every returned session's sidecar `working_directory` equals that path.
-Zero sessions from other directories. If --here returns the full corpus, the
-sidecar join is not wired → FAIL.
+Expected: at least one session, including
+  6b705409-e077-4c05-a7c1-1b1b476e9583  "DuckDB Skills Fork for Cortex Code"
+whose working_directory is stored as `c:\Users\woodsonp\Claude\Dev\duckdb-skills`
+(lowercase drive letter). Zero sessions from other directories.
+
+More than one session is expected drift — later work in this directory adds
+sessions. ZERO sessions is a FAIL: a case-sensitive `=` against $PWD.Path returns
+nothing and looks deceptively like a clean scope.
+If --here returns the full corpus, the sidecar join is not wired → FAIL.
+```
+
+**A12 — documented contract present in SKILL.md**
+
+Covers requirements 2, 3, and 10, which no other check touches.
+
+```
+Select-String -Pattern "DSK_KEYWORD","DSK_CWD","duckdb -csv -f","/duckdb-skills:read-memories" skills\read-memories\SKILL.md
+Expected: at least one match per pattern; paste the matched lines.
+Plus: quote the lines carrying the do-not-narrate contract (requirement 10).
 ```
