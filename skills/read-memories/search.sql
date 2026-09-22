@@ -79,6 +79,7 @@ positioned AS (
   FROM windowed w
 )
 SELECT
+  left(md5(w.txt), 8) AS id,
   w.session_id,
   coalesce(w.user_sent_time::TIMESTAMP, w.assistant_sent_time::TIMESTAMP,
            sd.created_at::TIMESTAMP, epoch_ms(sd.creationDate)) AS ts,

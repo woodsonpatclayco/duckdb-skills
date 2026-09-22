@@ -10,20 +10,30 @@ description: >
 Search past session logs silently — do NOT narrate the process. Absorb the results into your
 answer and continue; never dump raw logs or CSV to the user.
 
+When a snippet was truncated (a `chars` value bigger than the ~500-character snippet, or a
+`...` marker) and the cut portion matters, retrieve the full message with `message.sql` and
+**summarise it — never print a 40 KB message back to the user.** This is documentation, not an
+enforceable check: nothing can verify a future agent obeys it, so it is stated here to make that
+limit explicit. Measured worst case: **40,396 characters, roughly 10,000 tokens** — big enough
+that dumping it wholesale would swamp the response.
+
 ## User invocation
 
 ```
 /duckdb-skills:read-memories <keyword> [--here]
+/duckdb-skills:read-memories --full <id>
 ```
 
 `<keyword>` is a substring to search for. `--here` scopes the search to sessions whose working
-directory matches the current one; omit it to search every Cortex Code session.
+directory matches the current one; omit it to search every Cortex Code session. `--full <id>`
+retrieves the complete text of a message by the 8-character `id` from a previous search's `id`
+column.
 
 ## Agent invocation
 
-The user never sets `DSK_KEYWORD` or `DSK_CWD` directly — the agent sets them before running
-`search.sql`. Set `DSK_CWD` to the empty string when `--here` was not given; the query then
-applies no directory filter.
+The user never sets `DSK_KEYWORD`, `DSK_CWD`, `DSK_MSG`, or `DSK_SESSION` directly — the agent
+sets them before running the corresponding file. Set `DSK_CWD` to the empty string when `--here`
+was not given; the query then applies no directory filter.
 
 ```powershell
 $env:DSK_KEYWORD = '<keyword>'; $env:DSK_CWD = $PWD.Path
@@ -32,6 +42,20 @@ duckdb -csv -f "<abs path>\skills\read-memories\search.sql"
 
 Omit the last line of `$env:DSK_CWD = ...` (leave it `''`) when `--here` was not passed.
 
+For `--full <id>`, run `message.sql` instead:
+
+```powershell
+$env:DSK_MSG = '<id>'; $env:DSK_SESSION = ''
+duckdb -csv -f "<abs path>\skills\read-memories\message.sql"
+```
+
+`DSK_MSG` is matched case-insensitively with surrounding whitespace trimmed
+(`lower(trim(getenv('DSK_MSG')))` against `left(md5(txt), 8)`), so an id pasted uppercase still
+resolves. Set `DSK_SESSION` to the `session_id` from the search row that produced the id to scope
+to one occurrence, or leave it `''` to return every occurrence. An id can legitimately span
+several sessions — `message.sql` returns one row per occurrence, with identical `txt` but
+differing `session_id`/`ts`/`title`; do not collapse them.
+
 Each `.sql` file is run with `-f`, not `-c`, because a `.sql` file has no way to learn the
 working directory on its own — DuckDB exposes no cwd function and `$PWD` is not an environment
 variable — and because PowerShell expands `$` inside double-quoted `-c` strings, which
@@ -39,11 +63,12 @@ silently breaks any inline JSON path like `'$.type'`.
 
 ### Other files
 
-Beyond `search.sql`, this skill has three more single-purpose files:
+Beyond `search.sql`, this skill has four more single-purpose files:
 
 | File | Use for |
 |---|---|
 | `search.sql` | keyword search over conversation text (the default for the invocation above) |
+| `message.sql` | retrieving the complete untruncated text of a message by its `id` (`DSK_MSG` required, `DSK_SESSION` optional) |
 | `sqlresults.sql` | recovering a past Snowflake SQL result set by keyword (`DSK_KEYWORD` required) |
 | `sqlresults-summary.sql` | a `total`/`with_rows_returned` coverage count of recoverable SQL history (ignores `DSK_KEYWORD`) |
 | `coverage.sql` | a single `distinct_files` sanity count of the corpus this skill reads (ignores `DSK_KEYWORD`) |
@@ -93,6 +118,15 @@ for ordinary "what did we discuss" recall.
 - `search.sql` returns the **most recent** matches first (`ORDER BY ts DESC`), with a
   deterministic tiebreak (`session_id, md5(txt)`) so identical runs return identical rows.
   `sqlresults.sql` orders by `session_id, md5(result_text)` for the same reason.
+- `search.sql`'s first column is `id`: **`left(md5(txt), 8)`**, an 8-character prefix of the
+  same `md5(txt)` used in its ordering tiebreak. It is a stable handle for a message — pass it
+  to `message.sql` via `--full <id>` to retrieve the complete text a snippet cut off. Measured
+  collision-free across 8,472 distinct message texts.
+- `message.sql` applies the **same block filters** as `search.sql` (`$.type = 'text'`,
+  `<system-reminder>` excluded) so the two files agree on the id space — an id minted by
+  `search.sql` always resolves to the same message in `message.sql`. It returns every column
+  `search.sql` does except `snippet`/`matches`, plus the complete `txt` with no window, no
+  truncation, and no `LIMIT`.
 
 ## Step — internalize
 
