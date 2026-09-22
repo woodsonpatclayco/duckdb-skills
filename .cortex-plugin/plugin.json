@@ -1,0 +1,13 @@
+{
+  "name": "duckdb-skills",
+  "description": "DuckDB-powered skills for Cortex Code: read any data file (CSV, JSON, Parquet, Avro, Excel, spatial, SQLite), attach and query DuckDB databases, convert formats, explore S3/GCS/Azure object storage, run spatial queries, search DuckDB/DuckLake docs, search past session logs, and install/update DuckDB extensions.",
+  "version": "0.2.4",
+  "author": {
+    "name": "duckdb",
+    "url": "https://github.com/duckdb"
+  },
+  "repository": "https://github.com/duckdb/duckdb-skills",
+  "homepage": "https://duckdb.org",
+  "license": "MIT",
+  "keywords": ["duckdb", "ducklake", "parquet", "csv", "json", "avro", "excel", "iceberg", "delta", "read-file", "read-memories", "duckdb-docs", "data-exploration", "session-logs", "query", "sql", "attach-db"]
+}
