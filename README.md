@@ -2,6 +2,13 @@
 
 A [Claude Code](https://claude.ai/code) plugin that adds DuckDB-powered skills for data exploration and session memory.
 
+> **This is a fork adapted for [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code).**
+> Upstream is [duckdb/duckdb-skills](https://github.com/duckdb/duckdb-skills). Only `read-memories`
+> differs: it searches Cortex Code session logs instead of Claude Code ones, and is written for
+> Windows / PowerShell. The other eight skills are unmodified from upstream and the sections below
+> describe them as upstream does — including the Claude Code install and local-development steps,
+> which do not apply to a Cortex Code install (plugins live in `~/.snowflake/cortex/plugins/`).
+
 ## Installation
 
 ### From the Discover tab (coming soon)
@@ -68,11 +75,14 @@ Search DuckDB and DuckLake documentation and blog posts using full-text search a
 ```
 
 ### `read-memories`
-Search past Claude Code session logs to recover context from previous conversations — decisions made, patterns established, open TODOs. Offloads large result sets to a temporary DuckDB file for interactive drill-down.
+Search past **Cortex Code** session logs (`~/.snowflake/cortex/conversations/`) to recover context from previous conversations — decisions made, patterns established, open TODOs. Skips injected `<system-reminder>` context and internal `thinking` blocks so hits are real conversation. A separate mode recovers the result sets of SQL queries run in past sessions.
 
 ```
+/duckdb-skills:read-memories <keyword> [--here]
 /duckdb-skills:read-memories duckdb --here
 ```
+
+`--here` scopes to sessions whose working directory matches the current one.
 
 ### `install-duckdb`
 Install or update DuckDB extensions. Supports `name@repo` syntax for community extensions and a `--update` flag that also checks whether your DuckDB CLI is on the latest stable version.
@@ -85,12 +95,14 @@ Install or update DuckDB extensions. Supports `name@repo` syntax for community e
 
 ## Session state
 
-All skills share a single `state.sql` file per project — a plain SQL file containing ATTACH/USE/LOAD statements, secrets, and macros. When state is first needed, you'll be asked where to store it:
+All skills except `read-memories` share a single `state.sql` file per project — a plain SQL file containing ATTACH/USE/LOAD statements, secrets, and macros. When state is first needed, you'll be asked where to store it:
 
 1. **In the project directory** (`.duckdb-skills/state.sql`) — colocated with the project, optionally gitignored
 2. **In your home directory** (`~/.duckdb-skills/<project>/state.sql`) — keeps the repo clean
 
 The file is append-only and idempotent. Any skill restores the session via `duckdb -init state.sql`.
+
+`read-memories` stays outside this convention deliberately: it reads a fixed absolute log path and needs no attached database, so it neither creates nor reads `state.sql`.
 
 ## Local development
 
@@ -122,12 +134,14 @@ You can test individual skills directly:
 Skills reference each other where it makes sense:
 
 - `read-file` suggests `query` for follow-up exploration and `attach-db` for persisting large files
-- `query`, `read-file`, and `read-memories` all use `duckdb-docs` to troubleshoot DuckDB errors automatically
-- All skills share the same `state.sql` — secrets and macros set up by `read-file` are reused by `query`, and databases attached by `attach-db` are available everywhere
+- `query` and `read-file` use `duckdb-docs` to troubleshoot DuckDB errors automatically
+- Those skills share the same `state.sql` — secrets and macros set up by `read-file` are reused by `query`, and databases attached by `attach-db` are available everywhere. `read-memories` is standalone and shares nothing.
 
 ## Platform support
 
-These skills have been tested on **macOS** and **Linux**. Windows is not yet fully supported — some shell commands and path handling may not work as expected. We plan to improve Windows compatibility in a future release.
+These skills have been tested upstream on **macOS** and **Linux**. Windows is not fully supported by the upstream skills — some shell commands and path handling may not work as expected.
+
+In this fork, `read-memories` **is** written for and verified on **Windows / PowerShell 5.1**: its SQL ships in a `.sql` file invoked with `duckdb -f` (PowerShell expands `$` inside double-quoted `-c` strings, silently breaking inline JSON paths), and its path handling accepts both `/` and `\` separators.
 
 ## Reporting issues & suggestions
 
