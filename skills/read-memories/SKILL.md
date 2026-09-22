@@ -80,6 +80,19 @@ for ordinary "what did we discuss" recall.
   (`c:\Users\...`) while PowerShell's `$PWD.Path` renders an uppercase one.
 - `search.sql` and `sqlresults.sql` require `DSK_KEYWORD` and fail loudly (non-zero exit) if
   it is empty, rather than silently matching everything.
+- The keyword is matched as a **literal substring**, case-insensitive, via `strpos` — not a
+  `LIKE` pattern. `_` and `%` in the keyword are ordinary characters, not wildcards, so a
+  keyword like `sql_execute` only matches text that actually contains it.
+- `search.sql`'s `snippet` is a **match-centred window**, not a prefix: 500 characters
+  starting 120 characters before the match. A leading or trailing `...` marks a cut on that
+  side; a message that fits whole is returned with no markers. The `chars` column gives the
+  full untruncated length, so how much was hidden is knowable without arithmetic.
+- Both keyword files return a `matches` column: the total number of rows that matched
+  **before** the `LIMIT` (40 for `search.sql`, 20 for `sqlresults.sql`), so a capped result
+  set is visible rather than silent.
+- `search.sql` returns the **most recent** matches first (`ORDER BY ts DESC`), with a
+  deterministic tiebreak (`session_id, md5(txt)`) so identical runs return identical rows.
+  `sqlresults.sql` orders by `session_id, md5(result_text)` for the same reason.
 
 ## Step — internalize
 

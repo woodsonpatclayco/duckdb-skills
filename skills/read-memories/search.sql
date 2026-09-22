@@ -8,7 +8,9 @@
 -- sample and then errors with "Could not find key" on any file that has them).
 --
 -- Driven by env vars the caller sets before invoking this file:
---   DSK_KEYWORD substring to match, required (error()s if empty)
+--   DSK_KEYWORD substring to match, required (error()s if empty). Matched as a
+--               literal case-insensitive substring, NOT a LIKE pattern, so
+--               `_` and `%` in the keyword are not wildcards.
 --   DSK_CWD     current directory for --here scoping, '' = no directory filter
 --
 -- Invoke:
@@ -23,6 +25,12 @@
 -- scoping. Sidecars come in two shapes (finding 7): only session_id, title,
 -- and working_directory exist in both, so those are the only sidecar fields
 -- used besides the timestamp fallbacks below.
+--
+-- The snippet is a match-centred window, not a prefix: it starts 120 chars
+-- before the match and covers 500 chars, with a leading/trailing "..." when
+-- text was cut on that side. `chars` reports the full untruncated length so
+-- "how much did I not see" needs no arithmetic. `matches` reports the total
+-- row count before LIMIT, so the 40-row cap is visible rather than silent.
 WITH kw_guard AS (
   SELECT CASE WHEN coalesce(getenv('DSK_KEYWORD'), '') = ''
               THEN error('DSK_KEYWORD is required') ELSE 1 END AS ok
@@ -49,23 +57,45 @@ side AS (
   )
 ),
 blocks AS (
-  SELECT h.session_id, h.role, h.user_sent_time, h.assistant_sent_time, unnest(h.content::JSON[]) AS c, kw_guard.ok
+  SELECT h.session_id, h.role, h.user_sent_time, h.assistant_sent_time,
+         unnest(h.content::JSON[]) AS c, kw_guard.ok
   FROM hist h, kw_guard
+),
+texted AS (
+  SELECT
+    b.session_id, b.role, b.user_sent_time, b.assistant_sent_time, b.ok,
+    json_extract_string(b.c, '$.type') AS block_type,
+    json_extract_string(b.c, '$.text') AS txt
+  FROM blocks b
+),
+windowed AS (
+  SELECT
+    t.*,
+    strpos(lower(txt), lower(getenv('DSK_KEYWORD'))) AS p
+  FROM texted t
+),
+positioned AS (
+  SELECT w.*, greatest(1, w.p - 120) AS win_start
+  FROM windowed w
 )
 SELECT
-  b.session_id,
-  coalesce(b.user_sent_time::TIMESTAMP, b.assistant_sent_time::TIMESTAMP,
-           s.created_at::TIMESTAMP, epoch_ms(s.creationDate)) AS ts,
-  b.role,
-  s.title,
-  left(json_extract_string(b.c, '$.text'), 500) AS snippet
-FROM blocks b
-LEFT JOIN side s ON b.session_id = s.s_session_id
-WHERE b.ok = 1
-  AND json_extract_string(b.c, '$.type') = 'text'
-  AND json_extract_string(b.c, '$.text') ILIKE '%' || getenv('DSK_KEYWORD') || '%'
-  AND json_extract_string(b.c, '$.text') NOT ILIKE '%<system-reminder>%'
+  w.session_id,
+  coalesce(w.user_sent_time::TIMESTAMP, w.assistant_sent_time::TIMESTAMP,
+           sd.created_at::TIMESTAMP, epoch_ms(sd.creationDate)) AS ts,
+  w.role,
+  sd.title,
+  (CASE WHEN w.win_start > 1 THEN '...' ELSE '' END)
+    || substr(w.txt, w.win_start, 500)
+    || (CASE WHEN length(w.txt) > w.win_start + 499 THEN '...' ELSE '' END) AS snippet,
+  length(w.txt) AS chars,
+  count(*) OVER () AS matches
+FROM positioned w
+LEFT JOIN side sd ON w.session_id = sd.s_session_id
+WHERE w.ok = 1
+  AND w.block_type = 'text'
+  AND w.p > 0
+  AND w.txt NOT ILIKE '%<system-reminder>%'
   AND (coalesce(getenv('DSK_CWD'), '') = ''
-       OR lower(replace(s.working_directory, '/', '\')) = lower(replace(getenv('DSK_CWD'), '/', '\')))
-ORDER BY ts
+       OR lower(replace(sd.working_directory, '/', '\')) = lower(replace(getenv('DSK_CWD'), '/', '\')))
+ORDER BY ts DESC, w.session_id, md5(w.txt)
 LIMIT 40;
