@@ -6,10 +6,18 @@
 -- rename doesn't silently halve coverage again.
 --
 -- Driven by env vars the caller sets before invoking this file:
---   DSK_KEYWORD substring to match, required (error()s if empty)
+--   DSK_KEYWORD substring to match, required (error()s if empty). Matched as
+--               a literal substring (case-insensitive) via strpos, NOT a
+--               LIKE pattern, so `_` and `%` in the keyword are not
+--               wildcards. (The tool-name match below is a separate,
+--               deliberate LIKE pattern and keeps its wildcard.)
 --
 -- For a coverage summary instead of rendered results, use
 -- sqlresults-summary.sql, which ignores DSK_KEYWORD entirely.
+--
+-- `matches` reports the total row count before LIMIT, so the 20-row cap is
+-- visible rather than silent. Ordering is deterministic
+-- (session_id, md5(result_text)) so identical runs return identical rows.
 --
 -- Invoke:
 --   duckdb -csv -f "<abs path>\skills\read-memories\sqlresults.sql"
@@ -42,9 +50,10 @@ tool_results AS (
 SELECT
   regexp_extract(filename, '([^/\\]+)\.history\.jsonl$', 1) AS session_id,
   tool_name,
-  result_text
+  result_text,
+  count(*) OVER () AS matches
 FROM tool_results
 WHERE ok = 1
-  AND result_text ILIKE '%' || getenv('DSK_KEYWORD') || '%'
-ORDER BY session_id
+  AND strpos(lower(result_text), lower(getenv('DSK_KEYWORD'))) > 0
+ORDER BY session_id, md5(result_text)
 LIMIT 20;
