@@ -1,0 +1,664 @@
+# PLAN-3 — One local SQL surface over Snowflake extracts and Excel workbooks
+
+> **Version 3**, superseding `PLAN-2.md` (frozen; kept for the record). Three instructions changed,
+> all forced by measurement taken while specifying item 2. Review the delta, not the whole file.
+>
+> 1. **Stage-1 invalidation compares row count only, not bytes.** PLAN-2 said "compare `SHOW TABLES`
+>    rows/bytes". Measured twice, ~9 minutes apart, on `DT_PROJECTS`: `ROW_COUNT` held at **42,161**
+>    while `BYTES` moved **7,463,424 → 7,430,144**. A dynamic-table refresh reorganises
+>    micro-partitions, so bytes move with unchanged content. Comparing bytes would report "changed"
+>    on nearly every read and destroy the cost saving the two-stage check exists to create.
+>    `source_bytes` becomes provenance only.
+> 2. **`DYNAMIC_TABLE_REFRESH_HISTORY` is not available to this role**, so there is no cheap
+>    per-refresh row-statistics signal that could resolve the stage-2 ambiguity.
+>    `INFORMATION_SCHEMA.DYNAMIC_TABLE_REFRESH_HISTORY` returns zero rows and
+>    `SNOWFLAKE.ACCOUNT_USAGE` is `not authorized`. The ambiguous-SKIP trade-off is therefore
+>    unavoidable rather than chosen, and must be bounded by an age ceiling instead.
+> 3. **Item 2 ships as two specs, not one**, so the spec count is **eight**, not seven. Reason in
+>    "Intended spec boundaries".
+
+
+> **Version 2**, superseding `PLAN-1.md` (frozen; kept for the record). Three instructions changed;
+> everything else is identical, so review the delta, not the whole file.
+>
+> **Delta from PLAN-1 — all three forced by measurement, not preference:**
+>
+> 1. **The `TRY_TO_NUMBER` table was wrong, and its conclusion with it.** PLAN-1 claimed the macro
+>    shim was "the value-correct path" for `TRY_TO_NUMBER`. Checked against a live Snowflake
+>    connection 2026-09-23: it is not. Snowflake returns `12` / `NUMBER(38,0)`; the seeded macro
+>    returns `12.300000` / `DECIMAL(38,6)`. See "Dialect" below, and item 1's corrected acceptance.
+> 2. **`<project-id>` has a Windows definition.** PLAN-1:308 pointed at
+>    `skills/query/SKILL.md:24-27` (`tr '/' '-'`), which leaves the drive colon — not a legal Windows
+>    directory name. Items 2 and 6 both build paths from it.
+> 3. **Fixture expectations are established against Snowflake, not inferred.** A methodological rule
+>    added to "Shared conventions"; it is what caught defect 1.
+>
+> A fourth measured fact was **added** rather than changed: DuckDB's `date_trunc()` returns
+> `TIMESTAMP` even from a `DATE` input, where Snowflake returns `DATE`.
+
+**Serves:** One SQL surface where a Snowflake extract and an Excel workbook sheet are both just
+tables, so joining them is ordinary SQL — and the joined result is saved and re-queryable without
+re-reading either source or re-running the query against Snowflake.
+
+## Why this exists
+
+Three problems, all observed rather than assumed:
+
+1. **Cortex Code writes Snowflake SQL fluently and DuckDB SQL badly.** Phil has hit this in live
+   sessions. Measured: 24 of 41 common Snowflake constructs fail on DuckDB v1.5.5.
+2. **Snowflake results live only in the conversation.** Every follow-up question re-reads them
+   from context or re-runs the query. `skills/read-memories/sqlresults.sql` exists purely to dig
+   past result sets out of session logs — evidence that losing them is a real cost.
+3. **Snowflake data and workbook data can't meet.** DuckDB can't reach Snowflake; Snowflake can't
+   reach `Data Extracts.xlsm`. A local file is the only place both can be joined.
+
+## Measured facts — all verified in-session on this machine, 2026-09-22/23
+
+### Transport: the app's own connection
+
+- `COPY INTO @~/<dir>/ FROM (<query>) FILE_FORMAT=(TYPE=PARQUET)` writes server-side;
+  `GET @~/<dir>/ 'file://C:/...'` pulls it to local disk — **verified working** through
+  `snowflake_sql_execute`.
+- Types survive exactly: `decimal(5,0)`, `decimal(12,2)`, and `'01100'` as VARCHAR with its
+  leading zero intact.
+- No `.venv`, no pip dependency, no CSV hop, no Okta prompt, and **rows never pass through the
+  conversation** — so results too large to read are still extractable.
+- Two gotchas: `GET` fails `ENOENT` unless the local target directory already exists, and the
+  stage copy bills storage until `REMOVE`.
+
+Rejected: the Python connector (needs a venv, pops an Okta browser window, which would make a
+"silent" refresh not silent). Rejected: `snow` CLI (not installed; CSV-only output forces a
+type-losing hop). Rejected: the `snowflake` DuckDB extension — see non-goals.
+
+### Dialect
+
+41 common Snowflake constructs against DuckDB v1.5.5: **raw 17, the macro shim 28,
+`polyglot` 36.** These are **error-free counts, not correctness counts** — both probes decide pass
+by absence of a DuckDB error class, not by comparing values. Item 1's fixture fixes that. Every
+failure is a loud `Catalog Error` at bind time, never a wrong value.
+
+**Under type assertion these three numbers become 16 / 26 / 33**, and lower again once documented
+deviations are counted separately — measured by item 1's shipped fixture. Do not quote 17/28/36 as a
+target: the raw 17 already propagated into one spec's acceptance check and cost a correction round.
+
+**`polyglot` is NOT transparent — verified.** With the extension loaded, plain
+`SELECT IFF(1>0,'y','n')` still fails. Snowflake SQL must be **wrapped**:
+`SELECT * FROM polyglot_query('<snowflake sql>', 'snowflake')`, with single quotes doubled. So
+polyglot is a deliberate wrapper call, not ambient dialect support — this materially shapes item 1
+and the skill guidance.
+
+Wrapped, it reaches what macros structurally cannot: `TOP n`→`LIMIT`, `MINUS`→`EXCEPT`,
+`NUMBER(38,2)`→`DECIMAL(38,2)`, `LISTAGG ... WITHIN GROUP`, `OBJECT_CONSTRUCT`→struct. It needs no
+connection, no driver, no auth, and exits in 0.20s.
+
+**The two compose — verified.** A session macro resolves *inside* `polyglot_query`:
+`TO_VARCHAR(123)` returned `123` through the wrapper. And **polyglot loads under the ad-hoc
+sandbox** (`enable_external_access=false`, `lock_configuration=true`, per
+`skills/query/SKILL.md:90-95`) — `TOP 1` transpiled and ran.
+
+**polyglot has one measured wrong translation — and the seeded macro was wrong too.** Corrected
+2026-09-23 against a live Snowflake connection (CLAYCO-DATAHUB), which PLAN-1 never did:
+
+| Path | valid `'12.3'` | bad `'abc'` |
+|---|---|---|
+| **Snowflake** | **`12`, `NUMBER(38,0)`** | NULL |
+| `polyglot` | `12.3`, `DOUBLE` | **errors** |
+| seeded macro shim | `12.300000`, `DECIMAL(38,6)` | NULL |
+| **corrected macro** | **`12`, `DECIMAL(38,0)`** | NULL |
+
+PLAN-1 recorded Snowflake's answer as an untyped "NUMBER" and concluded the macro shim was "the
+value-correct path for this case". **That conclusion was false.** Snowflake's `TO_NUMBER` /
+`TRY_TO_NUMBER` default to `NUMBER(38,0)` — no fractional digits, rounded half-away-from-zero — so
+the seeded `DECIMAL(38,6)` cast silently *preserves* decimals production would have rounded away.
+On cost data that is the dangerous direction: a query ported from Snowflake returns `12.3` locally
+where production returns `12`.
+
+The fix is a scale change from 6 to 0, verified to agree with Snowflake on every case tested:
+`'12.3'`→`12`, `'12.7'`→`13`, `'-12.7'`→`-13`, `'12.5'`→`13`, `''`→NULL, `'abc'`→NULL,
+`'1e3'`→`1000`, `typeof` = `DECIMAL(38,0)`.
+
+The macros are still the value-correct path for the `'abc'`→NULL case, which polyglot gets wrong, so
+the reason to keep the full seed set stands. What does not stand is trusting a macro because it was
+seeded and ran. Workflows must still **surface the transpiled SQL** when polyglot is used, which
+`polyglot_transpile` makes possible.
+
+**Not every Snowflake type is reachable from a DuckDB macro, and that must be recorded rather than
+asserted away.** `DIV0(1,0)` returns `0.000000` / `NUMBER(7,6)` on Snowflake and `DIV0(10,4)` returns
+`2.500000` / `NUMBER(8,6)` — the result *precision* varies with input precision, which a macro cannot
+see. Value correctness at scale 6 is reachable; the precision digit is not. Rows like this must be
+marked as deliberate documented deviations, never given an expectation copied from what DuckDB
+happens to return.
+
+**Two native-function type drifts, both silent under error-only probing:**
+
+- A hand-written `DATEADD` macro returned TIMESTAMP where Snowflake returns DATE.
+- **DuckDB's `date_trunc()` returns TIMESTAMP even from a `DATE` input** — measured for `month`,
+  `year`, `day` and `week` — where Snowflake's `DATE_TRUNC('month', <DATE>)` returns `DATE`
+  (confirmed live). It is **not macro-fixable** (a native function, no macro seam) and **polyglot
+  does not correct it** (its transpile is a pass-through to the same function). This construct read
+  as passing for as long as this project measured by absence of errors.
+
+**Every macro acceptance check must assert returned type as well as value**, and `DATEADD` stays out
+of the shipped macro file until it is fixed and type-asserted.
+
+### Workbook reads — type inference is unsafe
+
+Measured on `Clayco_Job_Costs_from_GL` in `Data Extracts.xlsm` (64 MB, 26 sheets, 61,741 rows):
+
+- `VENDOR_NAME` infers DOUBLE. With `ignore_errors=true`, `COUNT(VENDOR_NAME)` = **0 of 61,741**,
+  silently, query "succeeded". With `all_varchar=true` it is **51,571**.
+- Without `ignore_errors` it fails loudly: `Invalid Input Error: read_xlsx: Failed to parse cell
+  'I3': Could not convert string 'City of DeKalb' to DOUBLE`.
+- **`all_varchar` alone destroys dates.** `GL_PERIOD` returns VARCHAR holding Excel serials
+  (46204–46296) and `TRY_CAST('46204' AS DATE)` → **NULL**, silently. Correct:
+  `(DATE '1899-12-30' + to_days(GL_PERIOD::BIGINT))::DATE` → 2026-07-01 to 2026-10-01. The
+  trailing `::DATE` is required — `+ to_days()` yields TIMESTAMP.
+- **Lexicographic trap:** on `all_varchar` columns `MAX(JOB_COSTS)` = `'99999.72'`; cast first and
+  it is **256,178,387.75**.
+- Money survives exactly: `SUM(JOB_COSTS::DECIMAL(18,2))` = **22,390,953,840.93**.
+- Null rates differ wildly per column — `JOB_COSTS` 0% null, `VENDOR_NAME` 83.5% non-null,
+  `GL_PERIOD` **70.2% NULL**. Floors must be measured per column, never templated.
+- `.xlsm` reads fine and fast — 123-column sheet plus 61,741-row sheet in 1.4s. Macros are
+  irrelevant: DuckDB reads sheet values only, never touching `vbaProject.bin` or the Power Query
+  DataMashup blob.
+- No sheet-listing function exists. Sheet names come from `xl/workbook.xml` in the zip.
+  `Data Extracts.xlsm` has **26 sheets**, and the first is a 2-row `MetaData` sheet, **not data** —
+  matters for anything iterating all sheets.
+- Column names are hostile: embedded newline in `Projected\nCompletion Date`; duplicate headers
+  auto-suffixed **positionally** (`Job Cost to Date` / `...to Date3`).
+- `read_xlsx` params are exactly: `col0, header, all_varchar, stop_at_empty, ignore_errors,
+  range, sheet, empty_as_varchar, normalize_names`.
+
+### Lakehouse
+
+- `ducklake` and `excel` are **core** extensions (`installed_from = core`), not community.
+- DuckLake runs on a purely local catalog — `ATTACH 'ducklake:cat.ducklake' AS lake (DATA_PATH ...)`
+  — verified: created a table, `lake.snapshots()` returned 2 rows. **No PostgreSQL.** That was
+  ducksync's requirement, not DuckLake's.
+- History survives `CREATE OR REPLACE`: `FROM lake.snapshots()` lists every change and
+  `AT (VERSION => 1)` still returns pre-replace data. Materializing does not destroy its own
+  evidence.
+- DuckLake **inlines** small tables into the catalog file (`file_count = 0`); Parquet appears only
+  past a size threshold. Accepted — see non-goals.
+- Proven end to end: wrote a real `.xlsx` and `.parquet`, joined them, materialized into DuckLake,
+  then in a **separate process** read the result back without touching sources. Exits 0.64s/0.3s.
+
+## Shared conventions and verified traps
+
+These apply to every item. They are the reason the two source plans duplicated each other.
+
+**Platform.** Windows / PowerShell 5.1; chain with `;` never `&&`; absolute paths. SQL lives in
+`.sql` files invoked with `duckdb -f`, never inline `-c`, because PowerShell expands `$` inside
+double-quoted strings and breaks any `'$.type'` JSON path. Parameters arrive as environment
+variables. Path comparisons are case-insensitive and separator-normalized.
+
+The eight upstream skills are POSIX bash and the README states Windows is unsupported upstream.
+Only `skills/read-memories/` was written for this machine; **its conventions are the ones to
+copy**, not upstream's.
+
+**`duckdb -init` takes exactly one file, and a second `-init` silently replaces the first.**
+Verified: `duckdb -init a.sql -init b.sql` loses everything in `a.sql`. Every session-mode call
+already spends that slot on `state.sql` (`skills/query/SKILL.md:31,58,66,79,129`;
+`skills/attach-db/SKILL.md:143`). So helper macros are delivered by appending a
+`.read <forward-slash absolute path>` line to `state.sql`, idempotently — `.read` **requires
+forward slashes**, a backslash path fails `Error: cannot open`. Composed this way, shim and state
+macros both resolve (returned `shim_ok,7`).
+
+**Never decide pass/fail by matching the bare word `Error`.** DuckDB writes its `-init` banner to
+stderr and PowerShell surfaces that as `NativeCommandError`, so a working shim reports total
+failure. This cost a full debugging cycle. Match DuckDB's error classes only — `Catalog Error`,
+`Parser Error`, `Binder Error`, `Conversion Error`. The **exit code is trustworthy**: a
+successful `-init` run exits 0.
+
+**Assert returned types, not just values.** The `DATEADD` drift above is why.
+
+**Never write a `.sql` file with `Set-Content -Encoding UTF8`.** PowerShell 5.1 writes a UTF-8 BOM
+(bytes 239,187,191), and a BOM ahead of a `.read` dot-command breaks it —
+`Parser Error ... ∩╗┐.read`. Use `[IO.File]::WriteAllText(...)`. This matters directly: item 1
+appends a `.read` line to `state.sql`.
+
+**Acceptance checks name real values.** Row counts, sums, ages in minutes. "Output compiles" and
+"tests pass" are not observable by Phil and do not count.
+
+**Establish an expected value against Snowflake, never by observing DuckDB.** Any expectation about
+**Snowflake semantics** — a value, a type, a NULL-vs-empty answer — must come from running it on
+Snowflake, not from what DuckDB returns. An expectation copied from DuckDB passes by construction and
+certifies whatever DuckDB does as correct, which is the exact failure the dialect fixture exists to
+prevent. A live connection is available in session (`snowflake_sql_execute`), with `SYSTEM$TYPEOF()`
+for the type; **the session measuring it pastes the values into the spec so the implementer receives a
+fact rather than an errand.** This rule was added in version 2 because five macros were built the wrong
+way round and two inherited their error from PLAN-1's own measured-facts table. Where Snowflake's
+answer genuinely cannot be reproduced — `DIV0`'s input-dependent precision — mark the row as a
+documented deviation instead. This rule governs Snowflake semantics only; workbook figures (item 4) are
+measured from the workbook.
+
+## Non-goals — deliberate, do not add
+
+- **The `snowflake` DuckDB extension is never loaded by anything here.** Its ADBC teardown defect
+  leaves a process that does not exit, sometimes with results unreadable, once unkillable and
+  holding a driver lock that required a reboot. Reproduced on driver v1.11.0 and v1.14.0; full
+  write-up in `docs/duckdb-snowflake-findings.md`. Scope precisely: this forbids the **DuckDB
+  extension**, not programmatic Snowflake access. The `COPY INTO` + `GET` transport is fine.
+- **No ducksync, no Quack listener, no PostgreSQL.** ducksync routes every refresh through that
+  extension. Its two-stage invalidation *design* is adopted in item 2.
+- **No `.xls` support.** Excluded by Phil. No Excel COM, no conversion stage.
+- **No source workbook is ever written to.** Read-only always, including in tests. Workbooks are
+  read-only sources, so the entire `xlsx-connected-data` failure mode is out of scope by
+  construction.
+- **No long-lived service.** Every invocation is a short-lived DuckDB process that exits.
+- **No forced Parquet flush.** Catalog-inlined tables are accepted (Phil, 2026-09-23);
+  materialized tables need not be readable outside DuckDB.
+- **`Project_Profit` and the suffixed-column decoding are deferred.** Decided 2026-09-23: ship on
+  `Clayco_Job_Costs_from_GL` first. See "Follow-on work".
+- **No scheduled or background refresh.** Refresh happens when a session reads an expired extract.
+- **No extract retention or cleanup.** Growth is deliberately unmanaged; item 2 ships a
+  size-reporting command so it is visible, and acting on it stays manual. Do not add deletion.
+- **No contract scaffolder.** It existed to make a 123-column `Project_Profit` contract tractable;
+  with that deferred, its justification goes too. Revisit alongside `Project_Profit`.
+- **No Snowflake SQL emulator** (e.g. `nnnkkk7/snowflake-emulator`). Rejected 2026-09-22: a
+  translation layer that fails *silently* in front of cost data, requiring Docker, replacing
+  `duckdb -f` with HTTP and so discarding the ad-hoc sandbox, and shipping a separate CGO DuckDB
+  build without the `spatial`/`excel`/`sqlite` extensions `read-file` needs.
+- **No write outside this repo**, including under `~/.snowflake/`.
+
+## Items
+
+- **Item 1 first** — everything uses it.
+- **Track A (Snowflake):** 1 → 2.
+- **Track B (workbooks):** 1 → 3 → 4 → 5 → 6 → 7.
+- **Item 8 requires both tracks complete.**
+
+Ships independently: item 1 alone fixes the dialect friction Phil hits today. Track A alone
+delivers extracts. Track B alone delivers the lakehouse on the GL sheet, without `Project_Profit`.
+
+**Intended spec boundaries**, so the round count is visible before committing: `{1}`, **`{2a}`,
+`{2b}`**, `{3,4}` (discovering sheets and building the first contract against them are one job),
+`{5}`, `{6}`, `{7}`, `{8}` — **eight specs**. Items 4 and 5 are coupled through the assertion-format
+decision, so 5's spec must cite what 4 settled.
+
+**Item 2 splits at the sidecar schema**, changed in version 3 from a single `{2}`. `{2a}` is the
+sidecar schema as a written contract plus everything that *reads* it — `registry.sql`, the status and
+list tools — tested entirely against hand-written fixture sidecars with **no Snowflake at all**.
+`{2b}` is the skill that *writes* them: materialize, refresh, two-stage invalidation, force.
+
+Two reasons, both specific to this item:
+
+- **Half of item 2 cannot be re-run by a verifier.** Materialize and refresh need
+  `snowflake_sql_execute`, an agent tool, and `<project-id>` legitimately differs in the linked
+  `git worktree` verification runs in — so the verifier's extract root is empty and the implementer's
+  extracts are invisible to it. Front-loading `{2a}` makes eight checks permanently re-runnable by
+  Phil and by a verifier that populates its own fixture root.
+- **The schema is the interface.** Freezing and reviewing it before any agent writes a sidecar is
+  cheaper than discovering a missing field once both halves exist. Item 2's round-1 spec review found
+  two such fields (`source_rows`, `source_last_altered`) that the plan had not named.
+
+### 1 — Dialect: a macro file plus polyglot, and a rule for which to use
+
+Two mechanisms, each doing what it is good at, plus the routing rule between them — without that
+rule an implementer cannot write the skill guidance.
+
+**The macro file.** Promote the seed at `.duckdb-skills/sf-compat.sql` (currently **gitignored** via
+`.gitignore:3`, so the evidence this item rests on is un-backed-up) to a tracked
+**`skills/query/duckdb-compat.sql`** — named for what it is rather than for Snowflake, since it also
+carries `xl_date()`. Carries `TRY_TO_NUMBER`, `TO_NUMBER`, `DIV0`, `DIV0NULL`, `NVL`, `NVL2`, `IFF`,
+`ZEROIFNULL`, `NULLIFZERO`, `EQUAL_NULL`, `TO_VARCHAR`, `REGEXP_SUBSTR`, `CHARINDEX`, `LEN`.
+**Excludes `DATEADD`** until its TIMESTAMP drift is fixed and type-asserted. Adds **`xl_date()`** for
+Excel serials so that conversion is named once rather than retyped per column.
+
+**The seed is a starting point, not a verified artifact.** `TO_NUMBER` and `TRY_TO_NUMBER` must be
+`DECIMAL(38,0)`, not the seed's `DECIMAL(38,6)` — see "Dialect" above. Check every promoted macro
+against Snowflake rather than inheriting it.
+
+**Delivery — and not through `attach-db`.** `skills/attach-db/SKILL.md:111-137` is POSIX bash
+(`grep -q`, `cat >> <<'STATESQL'`, `mkdir -p`, `$HOME`) and does not run on this machine, so
+specifying it as the delivery path would ship macros that are never actually loaded. Instead ship
+**`tools\ensure-duckdb-compat.ps1`**, which creates or idempotently appends a
+`.read <forward-slash absolute path>` line to `state.sql`, BOM-free. Not a second `-init`.
+Touching the eight bash skills is out of scope.
+
+**Routing rule, to be stated in the skill text:** write plain DuckDB SQL with the macros loaded;
+reach for `polyglot_query(<sql>,'snowflake')` when a construct fails with a `Catalog Error` or
+when the SQL is being lifted verbatim from Snowflake; **always surface `polyglot_transpile`
+output** when polyglot runs, because of the `TRY_TO_NUMBER` class of flaw. Note polyglot requires
+doubling single quotes inside the wrapped string.
+
+**Pin `polyglot` explicitly** and record that it is a **community** extension (unlike `ducklake`
+and `excel`, which are core) — a community extension that auto-updates could change transpilation
+silently, the same risk class as the `TRY_TO_NUMBER` flaw. State what "pin" means operationally
+and assert it.
+
+The construct list becomes a tracked fixture, **`skills/query/duckdb-compat-tests.csv`**, one row
+per construct with `name, sql, expected_value, expected_type`. The existing probe cannot serve as
+it: `.duckdb-skills/dialect-probe.ps1:44` decides pass/fail with `-match 'Error|error:'`, the exact
+anti-pattern forbidden above, and it has no expected-value or expected-type column.
+
+The residual set — constructs neither path reaches — is **whatever the fixture run reports**, not
+a number asserted here. (The pre-merge list of six was measured against macros alone; polyglot
+reaches four of those six, so that list is stale.) Document the residuals so a session rewrites
+rather than retries blindly.
+
+**Acceptance:**
+
+- A before/after table over the fixture, every row asserting **value and returned type**. The raw
+  baseline is **16, not 17**: `DATE_TRUNC str` read as passing only while measurement was error-only,
+  and it fails type assertion in all three modes. Zero regressions among the remaining 16, each
+  reconciled **by name**, not by count. A verified count must be reported separately from a total that
+  includes documented deviations.
+- `xl_date(46204)` = `2026-07-01` **and** `typeof()` = `DATE`.
+- `TRY_TO_NUMBER('12.3')` via macro = **`12`** typed **`DECIMAL(38,0)`**, matching Snowflake's
+  `NUMBER(38,0)` default, and `TRY_TO_NUMBER('abc')` = `NULL` — the case polyglot gets wrong.
+  Corrected in version 2; PLAN-1 asserted `12.300000` / `DECIMAL(38,6)` here, which is the seed's
+  behaviour and not Snowflake's.
+- Every fixture row is classified as either an expectation established against Snowflake or a
+  **documented deviation** where DuckDB cannot reproduce Snowflake's type (`DIV0` precision,
+  `ARRAY_AGG` → `INTEGER[]`, `OBJECT_CONSTRUCT` → `STRUCT`). No row may carry an expectation
+  inferred from DuckDB's own output without being marked as such.
+- `tools\ensure-duckdb-compat.ps1` run **twice** against a fresh `state.sql` and against one
+  already holding an `ATTACH` line: show file contents both times — exactly one `.read` line, the
+  `ATTACH` intact.
+- A macro resolving through `-init "$STATE_DIR/state.sql"`, the way a session actually invokes it.
+
+### 2 — The `snowflake-extract` skill
+
+Materialize, sidecar, freshness check, bounded silent refresh.
+
+**Split the deliverable explicitly, because half of it cannot be a script, and ship it as two specs.**
+`COPY INTO` and `GET` run through `snowflake_sql_execute`, an **agent tool** — no PowerShell script can
+call it. Version 3 turns that split into two specs rather than two halves of one:
+
+- **2a — the read half, entirely runnable.** The sidecar schema as a written contract, plus
+  `registry.sql` and the status/list tools over it. Tested against generated fixture sidecars with **no
+  Snowflake at all**, so Phil and a verifier can re-run every check.
+- **2b — the write half, agent-driven.** Materialize, refresh, two-stage invalidation, force-refresh,
+  and the `SKILL.md` that carries the registry-first instruction. Demonstrated by invoking the skill.
+
+Each spec is homogeneous, so neither needs to label individual checks as command-versus-invocation.
+
+- `COPY INTO` Parquet → `GET` into a local directory it creates first → `REMOVE` the stage copy.
+- **One directory per extract**, because `COPY INTO` splits output (`data_0_0_0.snappy.parquet`,
+  …). Queried as `<dir>\*.parquet`, sidecar at `<dir>\_extract.json`, and temp-then-rename is a
+  **directory** rename — which also settles concurrent refresh.
+- **Sidecar fields named explicitly:** `name`, query text, source objects, UTC `materialized_at`,
+  window written, computed expiry, `row_count`, warehouse, and **connection name, role, and
+  database** — the same query under a different role returns different rows. Plus three baseline
+  fields added in version 3, without which the invalidation comparison has nothing to compare
+  against: **`source_rows`**, **`source_bytes`** (provenance only), and **`source_last_altered`**
+  (UTC, per source object).
+- **`output_bytes`** from `COPY INTO`'s result, so the extract's own size on disk is recorded and the
+  size report can be cross-checked. PLAN-2 asked for bytes as the fallback when `runtime_seconds` is
+  unavailable but named no field to hold them.
+- `runtime_seconds` from Snowflake's `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION()`, not a
+  shell clock. If unreliable, drop the field and report `row_count` and bytes instead — but say
+  which.
+- Freshness check whose **first output line is the age**, taking the window as a parameter.
+- **Two-stage invalidation**, adopted from ducksync's design. **Stage 1 compares `SHOW TABLES`
+  `rows` against a baseline stored in the sidecar** — a metadata-only command that consumes no
+  warehouse compute (verified: `QUERY_TYPE = SHOW`, `WAREHOUSE_SIZE` empty, `BYTES_SCANNED` 0, against
+  `COPY INTO` showing `X-Small` and 1,037,312 bytes). **Bytes are not compared** — see the version-3
+  delta. Stage 2 consults `INFORMATION_SCHEMA.TABLES.LAST_ALTERED` against a stored
+  `source_last_altered` baseline, to catch an in-place UPDATE that leaves the row count unchanged.
+  `LAST_ALTERED` must **not** be compared against `materialized_at`: on a dynamic table it advances on
+  every scheduled refresh, which would make "unchanged" unreachable.
+- **The ambiguous case, and its bound.** `LAST_ALTERED` moved while rows did not is ambiguous: on a
+  dynamic table that is every scheduled refresh regardless of content. Treating it as changed would
+  refresh on essentially every read, so it reports `SKIPPED (ambiguous)` **with the age on the same
+  line** and does not refresh. The accepted failure is an in-place UPDATE preserving the row count,
+  missed silently. It is bounded by an **age ceiling**: past `DSK_MAX_AGE_MINUTES` (default 1440) an
+  ambiguous result refreshes rather than skipping. Without the ceiling the miss is unbounded, and
+  `DSK_FORCE=1` does not bound it because it requires Phil to already suspect what the check failed to
+  tell him.
+- **An extract's identity is a name, not its query text.** Every extract is created with an
+  explicit name (`job_costs_gl_actuals`, `dt_projects`). SQL strings are unusable as keys —
+  whitespace or a changed `LIMIT` makes an identical result set look like a different query — so
+  the query is stored as **provenance**, and the name is what a session looks up and reuses.
+- **A registry, so a session can find an extract instead of re-querying Snowflake.** Without this
+  the plan's central saving does not happen: a session materializes an extract and the next
+  session re-runs the query against Snowflake because nothing told it the file existed. The
+  registry lists, per extract: `name`, path, query, source tables, `materialized_at`, expiry,
+  `row_count`, role, database, warehouse. Implement it as a **view over all sidecars** rather than
+  a second copy of the truth, so it cannot drift from the extracts it describes.
+  `tools\list-extracts.ps1` prints it, newest first, with an **age column**.
+- **The skill instructs sessions to check the registry before querying Snowflake.** This is
+  documentation, not an enforceable check — skills are stateless shell invocations and nothing can
+  compel a future session to look first. Say so rather than implying enforcement, following the
+  precedent at `skills/read-memories/SKILL.md:15-18`. It is now the **only** unenforceable claim in
+  this plan; every other rule is backed by a command or by the sidecar's own state.
+- **Location, decided 2026-09-23: per project, under the home directory.**
+  `~\.duckdb-skills\<project-id>\extracts\<name>\` for extracts and
+  `~\.duckdb-skills\<project-id>\lake.ducklake` for the lakehouse, following the existing
+  `~/.duckdb-skills/<project>/` convention in `README.md:98-102`. **Not** inside the repo:
+  extracts are production Snowflake data, and in-repo they are one `git add -A` away from being
+  committed in any project whose `.gitignore` lacks the entry.
+- **`<project-id>`, defined here in version 2 because PLAN-1's pointer was unimplementable.** It
+  said "as `skills/query/SKILL.md:24-27` already does", which is
+  `git rev-parse --show-toplevel | tr '/' '-'` — on Windows that yields
+  `C:-Users-woodsonp-Claude-Dev-duckdb-skills`, and a colon is not legal in a Windows directory
+  name. The definition is: the output of `git rev-parse --show-toplevel` if inside a work tree, else
+  the current directory; resolved to a full path; lowercased; trailing separator removed; then every
+  `\` and `/` replaced by `-` and every `:` deleted. For this repo that is exactly
+  `c-users-woodsonp-claude-dev-duckdb-skills`. Do not reproduce `SKILL.md:24`'s behaviour.
+  **In a linked `git worktree`, `--show-toplevel` returns the worktree root, so the id differs there
+  by design.** Since verification runs in a worktree, never pin the literal string in a check a
+  verifier re-runs — compare against the value computed from the current toplevel instead. A UNC
+  root (`\\server\share`) yields a leading `--`; accepted, not special-cased.
+- **Item 2 acceptance for this term:** one command printing the resolved `<project-id>`, whose output
+  contains no `:` and no path separator.
+- **State-file precedence also needs settling with it.** `skills/query/SKILL.md:22-25` prefers the
+  home-side `state.sql` over the project-local one when both exist. Item 1 deliberately writes only
+  to the project-local file and prints the path it resolved; whichever item first needs the home-side
+  path must decide the precedence and say so, because a delivery script writing to the file sessions
+  do not read fails silently.
+- **Consequence, accepted deliberately:** per-project isolation means the same Snowflake table is
+  pulled once per project, paying warehouse cost for identical bytes. Chosen over a shared store so
+  no project can refresh data underneath another project's materialized lakehouse table. Do not
+  "optimize" this into a global cache without revisiting that trade.
+- `allowed-tools` must include the Snowflake execute tool. Note the field may be advisory: eight
+  skills declare `allowed-tools: Bash`, but `read-memories` declares none and runs `duckdb` fine.
+  Verify by invocation, not frontmatter.
+
+**Freshness is a judgment, not a gate.** Each extract carries a window and expiry; the session
+decides whether the work is staleness-sensitive from the data's nature — transactional tables go
+stale fast, dimensional ones (`DT_PROJECTS`) do not. Defaults follow work mode (`AGENTS.md`):
+**1 hour analysis, 24 hours dev**. **The reader's mode governs**, passed as
+`DSK_WINDOW_MINUTES`; the sidecar records the writer's window as a fact only.
+
+**Extract freshness is never mtime.** Every `GET` rewrites the Parquet, so mtime always advances
+and every run would report REFRESHED for exactly the data most likely to be stale.
+
+**Past the window: re-pull silently**, no prompt. Print the sidecar's `row_count` and
+`runtime_seconds` *before* refreshing, and report elapsed time in one line after. The **first
+materialize is unguarded** — no prior runtime exists. **A failed re-pull must not silently serve
+stale data:** report the failure and the age, and do not present contents as current.
+**No sidecar = unknown age = stale.**
+
+**The window is the throttle — there is no per-session cap.** A refresh rewrites
+`materialized_at` and expiry, so subsequent reads see a fresh extract and do not re-trigger until
+the window elapses. That bounds refresh to at most once per window per extract, with no session
+state required. An earlier draft added a once-per-session cap; it was removed 2026-09-23 because it
+contradicted the window — an all-day analysis session with a 1-hour window would have refreshed
+once and then served seven-hour-old data.
+
+**Frequent refresh is the intended behaviour in analysis work, and the two-stage check is what
+makes it cheap.** Stage 1 compares `SHOW TABLES` rows through a metadata-only command, so a
+refresh attempt against unchanged data costs **no warehouse time** — it reports SKIPPED. A short
+window therefore buys currency without buying compute. Setting the window very low means "check
+often", not "re-pull often".
+
+**An explicit force-refresh must exist** (`DSK_FORCE=1`), bypassing both the window and the
+two-stage check, for when Phil knows the source changed and does not want to argue with a
+timestamp.
+
+**Acceptance.** Pin a real, small Snowflake object and its current row count at spec time — the
+way item 4 pins 61,741 rows — so Phil has a figure to check against; "a known row count" is not
+runnable. **Which spec owns which check:** everything requiring a materialize belongs to **2b**,
+including the registry round-trip below; **2a** proves the same behaviours against generated fixture
+sidecars. Then: that row count matching the sidecar's; an age in minutes from a backdated fixture
+sidecar (2a); an expiry that actually trips (2a); a missing or damaged sidecar treated as stale (2a);
+and one command reporting total extract size on disk (2a).
+
+**Registry round-trip, the check that proves reuse is possible:** materialize two named extracts,
+then `tools\list-extracts.ps1` prints both names with their row counts and ages, and querying one
+**by name** returns its pinned row count without touching Snowflake. Then delete one extract's
+directory and show the registry no longer lists it — proving the registry is derived from the
+sidecars rather than a stale second copy.
+
+**Refresh-throttle checks, since the window is now the only bound:**
+
+- With an expired extract and **unchanged** source: refresh reports **SKIPPED** via stage 1, with
+  **no warehouse time consumed** — the check that makes a short analysis window affordable.
+- Immediately after a refresh, a second read reports **fresh** and does **not** re-pull, proving
+  the rewritten sidecar is what bounds frequency.
+- `DSK_FORCE=1` re-pulls a *fresh* extract anyway, and says so.
+
+**Stage-side collision:** state the stage path convention literally — how an extract name maps to
+a `@~/<dir>` subdirectory, and what happens when two sessions choose the same name. The directory
+rename above settles only the *local* torn-file case.
+
+### 3 — Sheet discovery tool
+
+`tools\list-sheets.ps1 <absolute-workbook-path>` reads `xl/workbook.xml` from the zip. Read-only,
+no Excel, never opens the workbook. Must handle Excel's 31-character name truncation
+(`Subcontract_Totals_and_Invoicin`) and a contract-filename convention surviving spaces and
+multiple dots.
+
+**Acceptance:** against the pinned absolute path to `Data Extracts.xlsm`, prints **26** sheets,
+first is `MetaData`, and both `Project_Profit` and `Clayco_Job_Costs_from_GL` appear.
+
+### 4 — First hand-built contract: `Clayco_Job_Costs_from_GL`
+
+A **contract** is one `.sql` file per sheet holding a `CREATE OR REPLACE VIEW` over `read_xlsx`
+with `all_varchar = true`, **never** `ignore_errors`, and an explicit cast per column.
+
+Two format decisions to settle here rather than leave open: where assertions live (a `-- @assert`
+directive parsed by item 5, or a companion `<name>__assert` view — pick one), and
+`normalize_names = true` versus positional selection for headers containing literal newlines.
+
+Pin the absolute workbook path; there are ~30 files named `Data Extracts*.xlsm` on this machine
+and the numbers are meaningless without it.
+
+**Acceptance**, every value measured: **61,741** rows; `COUNT(VENDOR_NAME)` = **51,571**;
+`GL_PERIOD` `typeof()` = `DATE`, min **2026-07-01**, max **2026-10-01**, **18,395** non-null;
+`SUM(JOB_COSTS)` = **22,390,953,840.93** as `DECIMAL(18,2)` — a figure Phil can tie to a report;
+`MAX(JOB_COSTS)` = **256,178,387.75**, proving the cast-before-compare rule; and the ordered
+header list matching a committed fingerprint.
+
+### 5 — Assertion harness
+
+Runs each contract's assertions, reporting pass/fail per column. Covers per-column non-null floors
+(**measured individually** — `VENDOR_NAME` at 83.5% is a misleading template when `GL_PERIOD` is
+70.2% NULL), **direction-aware** row-count tolerance so a growing GL sheet doesn't cry wolf
+monthly, casts applied before any range comparison, and item 4's header fingerprint.
+
+**Acceptance — two mutation tests:**
+
+1. Drop `all_varchar` **and** add `ignore_errors = true` → harness FAILS naming `VENDOR_NAME` and
+   the **51,571 → 0** collapse. This is the silent-nulling detector and the harness's whole reason
+   to exist.
+2. Drop `all_varchar` only → harness FAILS reporting the `'City of DeKalb'` parse error and a
+   non-zero exit. Mutation 2 alone cannot prove the detector works, because the read dies before
+   any row exists.
+
+### 6 — Materialize into the lakehouse, with workbook freshness
+
+`CREATE OR REPLACE TABLE lake.<name> AS SELECT * FROM <contract>`. A `lake.manifest` table records
+source path, mtime, row count, and contract hash — `snapshots()` records changes but not
+provenance, so the manifest is still justified.
+
+**Workbook mtime is a valid signal** (unlike extract mtime, item 2).
+
+**Single writer.** The DuckLake catalog is one local DuckDB file at
+`~\.duckdb-skills\<project-id>\lake.ducklake`; two sessions materializing at once will hit a lock.
+State the single-writer expectation and what the lock error looks like, so a session recognises it
+instead of retrying.
+
+**Workbook may be locked or mid-sync.** `Data Extracts.xlsm` is SharePoint-synced and Phil often
+has Excel open. State the expected behaviour when `read_xlsx` meets a locked or partially-synced
+file — this is the most likely real-world failure of the workbook track.
+
+**Acceptance:** run refresh twice → second reports SKIPPED for all; touch a **scratch copy** of
+the workbook → next run reports REFRESHED with a row count. Never touch the live
+`Data Extracts.xlsm` — writing triggers a full re-upload and version churn, and violates this
+plan's own read-only non-goal. Also assert `FROM lake.snapshots()` lists the replace and
+`AT (VERSION => 1)` still returns pre-replace data. Note **`DATA_PATH` creates no directory** until
+the inlining threshold is crossed, so absence of a Parquet directory is not evidence of failure.
+
+### 7 — Workbook proof, routing, and the extension non-goal (lands with the workbook track)
+
+The **`Serves:` test**: point the contract at a nonexistent path, query the materialized table,
+get the identical row count — proving results really are re-queryable without re-reading sources.
+
+The non-goal asserted **behaviourally**: `SELECT extension_name FROM duckdb_extensions()
+WHERE loaded` returns **no** `snowflake` row, and every entrypoint exits 0 within budget. A grep
+for `LOAD snowflake` is a fake check — it already matches `docs/duckdb-snowflake-findings.md`, and
+it would miss `INSTALL snowflake` and `ATTACH ... (TYPE snowflake)`.
+
+Workbook routing: must say whether this extends `skills/read-file/SKILL.md` (which already routes
+`.xlsx` to `read_xlsx`) or adds a new skill.
+
+**Acceptance:** the nonexistent-path test returns the pinned GL row count; `duckdb_extensions()`
+shows no loaded `snowflake`.
+
+### 8 — The cross-source join (requires items 2 and 6)
+
+The thing this plan exists for: a landed extract directory (`<dir>\*.parquet`) joined to a
+materialized workbook table in one statement, process exiting under 2s.
+
+**The joined output must print the extract's age line alongside the row count.** Otherwise the
+headline feature can silently join a three-day-old extract — item 2 tracks extract age and item 6
+tracks workbook mtime, but the join itself would report neither. This also puts the freshness work
+in front of Phil in the one command he will actually run.
+
+**The join references the extract by name**, resolved through the registry — not by a hardcoded
+path. A path in a materialized query is what makes the lakehouse table break when an extract is
+refreshed into a new directory.
+
+README gains the patterns and the freshness rule. Standing-context budget: **≤ 4 description lines
+per new skill, maximum two new skills.** Nine descriptions already load at every session start
+whether used or not; README prose is free because it is not auto-loaded.
+
+**Acceptance:** Phil follows the doc from a clean shell and reaches a specific joined row count,
+with the extract age printed beside it.
+
+## Risks
+
+- **Positional column drift.** Mitigated by item 4's header fingerprint. Unresolved for
+  `Project_Profit`, which is why it is deferred.
+- **Casting money `DOUBLE → DECIMAL` freezes what Excel already stored.** It makes values exact
+  going forward; it does not recover precision Excel lost. The cent-exact SUM shows nothing was
+  lost *here* — a fact about this sheet, not a guarantee.
+- **polyglot mistranslation.** `TRY_TO_NUMBER` is the known case. Surfacing transpiled SQL is the
+  mitigation; it is a reporting discipline, not a fix.
+- **Seeded macros are unverified artifacts, and this is the risk that materialised.** Five shipped
+  macros asserted their own behaviour as Snowflake's answer: `TO_NUMBER`/`TRY_TO_NUMBER` (scale 6 vs
+  Snowflake's 0), `DIV0`/`DIV0NULL` (DOUBLE vs fixed-point), `REGEXP_SUBSTR` (`''` vs NULL on no
+  match), `UUID_STRING` (UUID vs VARCHAR). Mitigation is the fixture's `source` column plus a fixture
+  row per macro — a discipline, not a fix, and it only covers macros that have a row. Seven had none.
+- **`TRY_TO_DATE` disagrees with Snowflake on all-digit strings.** Snowflake reads `'46204'` as an
+  epoch offset and returns `1970-01-01`; DuckDB's `TRY_CAST` returns NULL. Unresolvable in a macro.
+  Use `xl_date()` for Excel serials; never `TRY_TO_DATE`. Directly relevant to item 4, whose worked
+  example is serial `46204`.
+- **Catalog inlining** means materialized tables are not readable as Parquet by other tools.
+  Accepted deliberately.
+- **A refreshed extract can change a materialized lakehouse table's meaning.** Item 6 records a
+  contract hash for workbooks, but a lakehouse table built over an extract has no equivalent tie to
+  *which* version of that extract it used. **The sidecar's `materialized_at` is the extract's version
+  token**; item 6's manifest records it alongside the contract hash. Within a project this is further
+  bounded by single-writer plus the registry's age column; it is the main reason extracts are not
+  shared across projects.
+- **Bytes are not a change signal, and there is no cheap substitute.** Row count is the only
+  metadata-only signal that proved stable across a dynamic-table refresh, and refresh history is not
+  authorized for this role. An in-place UPDATE that preserves the row count is therefore invisible to
+  the cheap check; the age ceiling bounds how long it stays invisible.
+
+## Follow-on work — not in this plan
+
+- **`Project_Profit` contract (123 columns).** Blocked on decoding the positionally-suffixed
+  columns: four `...to Date`/`...To Date` pairs plus four `Segment` equivalents differ only by an
+  integer suffix DuckDB assigned by position, and an upstream column insertion silently changes
+  it. Meaning must be established by reading the workbook's Power Query through the
+  `xlsx-power-query` skill (M code is base64 in `customXml`; grep and openpyxl never find it),
+  delivered as a committed mapping table. A separate spec once the GL sheet ships.
+- **Porting the eight upstream skills to PowerShell.** A real gap, but mixing a Windows port into
+  this work makes both unreviewable.
+- **Revisiting the `snowflake` extension** if its teardown defect is fixed upstream. Its
+  capabilities were never the problem.
