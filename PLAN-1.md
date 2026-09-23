@@ -1,7 +1,13 @@
 # PLAN-1 — One local SQL surface over Snowflake extracts and Excel workbooks
 
-> **DRAFT, not frozen.** No `TASK.md` names this plan, so edit in place. Supersedes the separate
-> `PLAN-2.md` (merged 2026-09-23; its content is in history at commit `185f93b`).
+> **FROZEN.** `TASK.md` (item 1) names this version, so revisions write `PLAN-2.md` rather than
+> editing here. Supersedes the separate `PLAN-2.md` draft (merged 2026-09-23; its content is in
+> history at commit `185f93b`) — that filename is now free for the next revision.
+>
+> **Known defect, to be fixed in the next version:** item 2's `<project-id>` derivation
+> (line 308) points at `skills/query/SKILL.md:24-27`, which is `tr '/' '-'` and leaves the Windows
+> drive colon — not a legal directory name. Items 2 and 6 both depend on the term. Item 1's spec
+> deliberately avoids defining it; see its "Deferred decision" section.
 
 **Serves:** One SQL surface where a Snowflake extract and an Excel workbook sheet are both just
 tables, so joining them is ordinary SQL — and the joined result is saved and re-queryable without
