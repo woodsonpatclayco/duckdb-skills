@@ -165,11 +165,27 @@ and `LOAD polyglot;` is required first — it does not autoload. `LOAD polyglot;
 **before** the sandbox `SET enable_external_access=false` line in Step 5 above, or it fails
 `Permission Error: Loading external extensions is disabled through configuration`.
 
-Macros compose *inside* `polyglot_query` (`TO_VARCHAR(123)` returns `123` through the wrapper
-once the macros are loaded, and fails without them). Always surface
-`polyglot_transpile('<sql>', 'snowflake')` output when polyglot runs — it is a scalar function,
-not a table function — since polyglot has known wrong translations (`TRY_TO_NUMBER`, `TO_CHAR`
-format strings) and the transpiled SQL is part of the answer, not debug detail.
+**A macro only composes inside `polyglot_query` for a name polyglot does not itself translate.**
+`TO_VARCHAR(123)` passes through the wrapper unchanged, so the macro resolves and returns `123`
+(and fails without the macros loaded). But where polyglot has its own translation for a name, that
+translation **wins and the macro is bypassed** — measured via `polyglot_transpile`:
+
+| wrapped call | polyglot rewrites it to | consequence |
+|---|---|---|
+| `TO_NUMBER('12.3')` | `CAST('12.3' AS DOUBLE)` | `12.3`, not Snowflake's `12` |
+| `TRY_TO_NUMBER('12.3')` | `CAST('12.3' AS DOUBLE)` | same, and `'abc'` errors instead of NULL |
+| `DIV0(1,0)` | native `CASE ... 1 / 0 ...` | `DOUBLE`, not fixed-point |
+| `DIV0NULL(1,NULL)` | native `CASE ...` | same |
+| `REGEXP_SUBSTR('abc','[0-9]+')` | `REGEXP_EXTRACT(...)` | `''` on no match, not NULL |
+
+So **do not route these five through polyglot.** Write them as plain DuckDB SQL with the macros
+loaded, where they are correct. Use polyglot for what macros structurally cannot reach — `TOP n`,
+`MINUS`, `NUMBER(38,2)`, `LISTAGG ... WITHIN GROUP`, `OBJECT_CONSTRUCT` — and also note
+`TO_CHAR` format strings are mistranslated (the tokens are passed through to `strftime` untouched).
+
+Always surface `polyglot_transpile('<sql>', 'snowflake')` output when polyglot runs — it is a scalar
+function, not a table function — because the transpiled SQL is the only way to see a bypass like the
+above, and it is part of the answer, not debug detail.
 
 See `skills/query/duckdb-compat.md` for the full macro inventory, the before/after fixture
 table, and the current residual list.
