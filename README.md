@@ -104,6 +104,16 @@ The file is append-only and idempotent. Any skill restores the session via `duck
 
 `read-memories` stays outside this convention deliberately: it reads a fixed absolute log path and needs no attached database, so it neither creates nor reads `state.sql`.
 
+**Precedence when both exist:** the project-local file wins. If `.duckdb-skills/state.sql` is
+present, it is used even when a home-side `~/.duckdb-skills/<project>/state.sql` also exists. This
+was decided, not derived from existing code: the project-local file is more discoverable, and
+`tools\ensure-duckdb-compat.ps1` already behaves this way. It deliberately **contradicts**
+`skills/query/SKILL.md:22-25`, which prefers the home-side file first — that skill's resolution is
+POSIX bash and does not run on Windows, so the contradiction is left standing rather than
+"reconciled," to avoid silently changing where a Windows session's macros land. No resolution code
+changes as a result of this note; it records the decision for whichever skill implements Windows
+state-file lookup next.
+
 ## Local development
 
 To test skills locally from a clone of this repo:
