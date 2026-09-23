@@ -272,9 +272,9 @@ both as one scriptable deliverable is a guaranteed correction round.
 - **One directory per extract**, because `COPY INTO` splits output (`data_0_0_0.snappy.parquet`,
   …). Queried as `<dir>\*.parquet`, sidecar at `<dir>\_extract.json`, and temp-then-rename is a
   **directory** rename — which also settles concurrent refresh.
-- Sidecar fields named explicitly: query text, source objects, UTC `materialized_at`, window
-  written, computed expiry, `row_count`, warehouse, and **connection name, role, and database** —
-  the same query under a different role returns different rows.
+- **Sidecar fields named explicitly:** `name`, query text, source objects, UTC `materialized_at`,
+  window written, computed expiry, `row_count`, warehouse, and **connection name, role, and
+  database** — the same query under a different role returns different rows.
 - `runtime_seconds` from Snowflake's `TOTAL_ELAPSED_TIME` via `QUERY_HISTORY_BY_SESSION()`, not a
   shell clock. If unreliable, drop the field and report `row_count` and bytes instead — but say
   which.
@@ -283,7 +283,31 @@ both as one scriptable deliverable is a guaranteed correction round.
   through a **no-warehouse** connection first; fall back to
   `information_schema.tables.last_altered` only when those move. Avoids waking a warehouse just to
   ask whether data changed.
-- One extract location, absolute, confirmed gitignored — production data, never committable.
+- **An extract's identity is a name, not its query text.** Every extract is created with an
+  explicit name (`job_costs_gl_actuals`, `dt_projects`). SQL strings are unusable as keys —
+  whitespace or a changed `LIMIT` makes an identical result set look like a different query — so
+  the query is stored as **provenance**, and the name is what a session looks up and reuses.
+- **A registry, so a session can find an extract instead of re-querying Snowflake.** Without this
+  the plan's central saving does not happen: a session materializes an extract and the next
+  session re-runs the query against Snowflake because nothing told it the file existed. The
+  registry lists, per extract: `name`, path, query, source tables, `materialized_at`, expiry,
+  `row_count`, role, database, warehouse. Implement it as a **view over all sidecars** rather than
+  a second copy of the truth, so it cannot drift from the extracts it describes.
+  `tools\list-extracts.ps1` prints it, newest first, with an **age column**.
+- **The skill instructs sessions to check the registry before querying Snowflake.** This is
+  documentation, not an enforceable check — the same honest limit as the once-per-session refresh
+  cap. Say so rather than implying enforcement.
+- **Location, decided 2026-09-23: per project, under the home directory.**
+  `~\.duckdb-skills\<project-id>\extracts\<name>\` for extracts and
+  `~\.duckdb-skills\<project-id>\lake.ducklake` for the lakehouse, following the existing
+  `~/.duckdb-skills/<project>/` convention in `README.md:98-102`. **Not** inside the repo:
+  extracts are production Snowflake data, and in-repo they are one `git add -A` away from being
+  committed in any project whose `.gitignore` lacks the entry. `<project-id>` is derived from the
+  project root path, as `skills/query/SKILL.md:24-27` already does.
+- **Consequence, accepted deliberately:** per-project isolation means the same Snowflake table is
+  pulled once per project, paying warehouse cost for identical bytes. Chosen over a shared store so
+  no project can refresh data underneath another project's materialized lakehouse table. Do not
+  "optimize" this into a global cache without revisiting that trade.
 - `allowed-tools` must include the Snowflake execute tool. Note the field may be advisory: eight
   skills declare `allowed-tools: Bash`, but `read-memories` declares none and runs `duckdb` fine.
   Verify by invocation, not frontmatter.
@@ -312,6 +336,12 @@ way item 4 pins 61,741 rows — so Phil has a figure to check against; "a known 
 runnable. Then: that row count matching the sidecar's; an age in minutes from a backdated fixture
 sidecar (a command, 2a); an expiry that actually trips; a missing sidecar treated as stale; and one
 command reporting total extract size on disk.
+
+**Registry round-trip, the check that proves reuse is possible:** materialize two named extracts,
+then `tools\list-extracts.ps1` prints both names with their row counts and ages, and querying one
+**by name** returns its pinned row count without touching Snowflake. Then delete one extract's
+directory and show the registry no longer lists it — proving the registry is derived from the
+sidecars rather than a stale second copy.
 
 **Stage-side collision:** state the stage path convention literally — how an extract name maps to
 a `@~/<dir>` subdirectory, and what happens when two sessions choose the same name. The directory
@@ -369,9 +399,10 @@ provenance, so the manifest is still justified.
 
 **Workbook mtime is a valid signal** (unlike extract mtime, item 2).
 
-**Single writer.** The DuckLake catalog is one local DuckDB file; two sessions materializing at
-once will hit a lock. State the single-writer expectation and what the lock error looks like, so a
-session recognises it instead of retrying.
+**Single writer.** The DuckLake catalog is one local DuckDB file at
+`~\.duckdb-skills\<project-id>\lake.ducklake`; two sessions materializing at once will hit a lock.
+State the single-writer expectation and what the lock error looks like, so a session recognises it
+instead of retrying.
 
 **Workbook may be locked or mid-sync.** `Data Extracts.xlsm` is SharePoint-synced and Phil often
 has Excel open. State the expected behaviour when `read_xlsx` meets a locked or partially-synced
@@ -410,6 +441,10 @@ headline feature can silently join a three-day-old extract — item 2 tracks ext
 tracks workbook mtime, but the join itself would report neither. This also puts the freshness work
 in front of Phil in the one command he will actually run.
 
+**The join references the extract by name**, resolved through the registry — not by a hardcoded
+path. A path in a materialized query is what makes the lakehouse table break when an extract is
+refreshed into a new directory.
+
 README gains the patterns and the freshness rule. Standing-context budget: **≤ 4 description lines
 per new skill, maximum two new skills.** Nine descriptions already load at every session start
 whether used or not; README prose is free because it is not auto-loaded.
@@ -428,6 +463,10 @@ with the extract age printed beside it.
   mitigation; it is a reporting discipline, not a fix.
 - **Catalog inlining** means materialized tables are not readable as Parquet by other tools.
   Accepted deliberately.
+- **A refreshed extract can change a materialized lakehouse table's meaning.** Item 6 records a
+  contract hash for workbooks, but a lakehouse table built over an extract has no equivalent tie to
+  *which* version of that extract it used. Within a project this is bounded by single-writer plus
+  the registry's age column; it is the main reason extracts are not shared across projects.
 
 ## Follow-on work — not in this plan
 
