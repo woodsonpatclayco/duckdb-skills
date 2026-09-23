@@ -295,8 +295,10 @@ both as one scriptable deliverable is a guaranteed correction round.
   a second copy of the truth, so it cannot drift from the extracts it describes.
   `tools\list-extracts.ps1` prints it, newest first, with an **age column**.
 - **The skill instructs sessions to check the registry before querying Snowflake.** This is
-  documentation, not an enforceable check — the same honest limit as the once-per-session refresh
-  cap. Say so rather than implying enforcement.
+  documentation, not an enforceable check — skills are stateless shell invocations and nothing can
+  compel a future session to look first. Say so rather than implying enforcement, following the
+  precedent at `skills/read-memories/SKILL.md:15-18`. It is now the **only** unenforceable claim in
+  this plan; every other rule is backed by a command or by the sidecar's own state.
 - **Location, decided 2026-09-23: per project, under the home directory.**
   `~\.duckdb-skills\<project-id>\extracts\<name>\` for extracts and
   `~\.duckdb-skills\<project-id>\lake.ducklake` for the lakehouse, following the existing
@@ -321,15 +323,28 @@ stale fast, dimensional ones (`DT_PROJECTS`) do not. Defaults follow work mode (
 **Extract freshness is never mtime.** Every `GET` rewrites the Parquet, so mtime always advances
 and every run would report REFRESHED for exactly the data most likely to be stale.
 
-**Past the window: re-pull silently**, no prompt. Bounded to **one refresh per extract per
-session**. Print the sidecar's `row_count` and `runtime_seconds` *before* refreshing, and report
-elapsed time in one line after. The **first materialize is unguarded** — no prior runtime exists.
-**A failed re-pull must not silently serve stale data:** report the failure and the age, and do
-not present contents as current. **No sidecar = unknown age = stale.**
+**Past the window: re-pull silently**, no prompt. Print the sidecar's `row_count` and
+`runtime_seconds` *before* refreshing, and report elapsed time in one line after. The **first
+materialize is unguarded** — no prior runtime exists. **A failed re-pull must not silently serve
+stale data:** report the failure and the age, and do not present contents as current.
+**No sidecar = unknown age = stale.**
 
-The once-per-session cap is **documentation, not an enforceable check** — skills are stateless
-shell invocations with no session store. Stated plainly, following
-`skills/read-memories/SKILL.md:15-18`.
+**The window is the throttle — there is no per-session cap.** A refresh rewrites
+`materialized_at` and expiry, so subsequent reads see a fresh extract and do not re-trigger until
+the window elapses. That bounds refresh to at most once per window per extract, with no session
+state required. An earlier draft added a once-per-session cap; it was removed 2026-09-23 because it
+contradicted the window — an all-day analysis session with a 1-hour window would have refreshed
+once and then served seven-hour-old data.
+
+**Frequent refresh is the intended behaviour in analysis work, and the two-stage check is what
+makes it cheap.** Stage 1 compares `SHOW TABLES` rows/bytes through a no-warehouse connection, so a
+refresh attempt against unchanged data costs **no warehouse time** — it reports SKIPPED. A short
+window therefore buys currency without buying compute. Setting the window very low means "check
+often", not "re-pull often".
+
+**An explicit force-refresh must exist** (`DSK_FORCE=1`), bypassing both the window and the
+two-stage check, for when Phil knows the source changed and does not want to argue with a
+timestamp.
 
 **Acceptance.** Pin a real, small Snowflake object and its current row count at spec time — the
 way item 4 pins 61,741 rows — so Phil has a figure to check against; "a known row count" is not
@@ -342,6 +357,14 @@ then `tools\list-extracts.ps1` prints both names with their row counts and ages,
 **by name** returns its pinned row count without touching Snowflake. Then delete one extract's
 directory and show the registry no longer lists it — proving the registry is derived from the
 sidecars rather than a stale second copy.
+
+**Refresh-throttle checks, since the window is now the only bound:**
+
+- With an expired extract and **unchanged** source: refresh reports **SKIPPED** via stage 1, with
+  **no warehouse time consumed** — the check that makes a short analysis window affordable.
+- Immediately after a refresh, a second read reports **fresh** and does **not** re-pull, proving
+  the rewritten sidecar is what bounds frequency.
+- `DSK_FORCE=1` re-pulls a *fresh* extract anyway, and says so.
 
 **Stage-side collision:** state the stage path convention literally — how an extract name maps to
 a `@~/<dir>` subdirectory, and what happens when two sessions choose the same name. The directory
