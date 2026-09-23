@@ -72,6 +72,30 @@ function Get-FirstNonTagValue($csvRow) {
     return $null
 }
 
+function Get-ModeLabel([string]$m) {
+    if ($m -eq 'polyglot') { return 'polyglot (macros loaded)' }
+    return $m
+}
+
+# Round 2 (C2): when both expected and actual parse as decimal, compare
+# numerically -- Snowflake's fixed-point rendering (e.g. "1.000") and DuckDB's
+# (e.g. "1.0") are the same number. Otherwise compare as exact strings. Type
+# comparison is never touched by this -- it stays an exact string match.
+function Test-ValueMatch([string]$expected, [string]$actual) {
+    if ($null -eq $expected) { $expected = '' }
+    if ($null -eq $actual) { $actual = '' }
+    $expDec = [decimal]0
+    $actDec = [decimal]0
+    $ns = [System.Globalization.NumberStyles]::Float
+    $ci = [System.Globalization.CultureInfo]::InvariantCulture
+    $expIsNum = [decimal]::TryParse($expected, $ns, $ci, [ref]$expDec)
+    $actIsNum = [decimal]::TryParse($actual, $ns, $ci, [ref]$actDec)
+    if ($expIsNum -and $actIsNum) {
+        return ($expDec -eq $actDec)
+    }
+    return ($actual -ceq $expected)
+}
+
 function Invoke-FixtureRow {
     param(
         [string]$Name,
@@ -185,13 +209,25 @@ foreach ($row in $rows) {
         $typeOk = ($r.ActualType -ceq $row.expected_type)
         $valueOk = $true
         if ($row.check_mode -ne 'type_only') {
-            $valueOk = ($r.ActualValue -ceq $row.expected_value)
+            $valueOk = Test-ValueMatch $row.expected_value $r.ActualValue
         }
 
         $pass = ($r.ExitCode -eq 0) -and (-not $r.ErrorClass) -and ($r.N -eq 1) -and ($r.Cols -eq 1) -and $typeOk -and $valueOk
 
+        # C4: a pass is "verified" only when the expectation is Snowflake's own
+        # answer (source=snowflake). A pass on a deviation/duckdb-native row is
+        # real but on a relaxed (type-kind) expectation, so it is counted
+        # separately and never inflates the verified count. A row that does not
+        # pass is "fail" regardless of source -- source is never an input to
+        # pass/fail, only to how a pass is classified.
+        $category = 'fail'
+        if ($pass) {
+            if ($row.source -eq 'snowflake') { $category = 'verified' } else { $category = 'deviation' }
+        }
+
         $allResults[$row.name][$m] = [PSCustomObject]@{
             Pass        = $pass
+            Category    = $category
             ExitCode    = $r.ExitCode
             ErrorClass  = $r.ErrorClass
             N           = $r.N
@@ -215,7 +251,7 @@ foreach ($row in $rows) {
 # --- Before/after table ---
 Write-Output ''
 Write-Output 'BEFORE/AFTER TABLE'
-$header = @('name') + $modesToRun
+$header = @('name') + ($modesToRun | ForEach-Object { Get-ModeLabel $_ })
 Write-Output ($header -join ',')
 foreach ($row in $rows) {
     $cells = @($row.name)
@@ -225,11 +261,15 @@ foreach ($row in $rows) {
     Write-Output ($cells -join ',')
 }
 
-# --- Pass counts ---
+# --- Three-way split: verified / deviation / fail (C4) ---
 Write-Output ''
 foreach ($m in $modesToRun) {
-    $passCount = @($rows | Where-Object { $allResults[$_.name][$m].Pass }).Count
-    Write-Output "$m pass count: $passCount / $($rows.Count)"
+    $verifiedCount = @($rows | Where-Object { $allResults[$_.name][$m].Category -eq 'verified' }).Count
+    $deviationCount = @($rows | Where-Object { $allResults[$_.name][$m].Category -eq 'deviation' }).Count
+    $failCount = @($rows | Where-Object { $allResults[$_.name][$m].Category -eq 'fail' }).Count
+    $label = Get-ModeLabel $m
+    $passCount = $verifiedCount + $deviationCount
+    Write-Output "$label pass count: $passCount / $($rows.Count)  (verified: $verifiedCount  deviation: $deviationCount  fail: $failCount)"
 }
 
 # --- Residual list (only meaningful when all three modes ran) ---
