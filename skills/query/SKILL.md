@@ -155,6 +155,27 @@ For natural language questions, also provide a brief interpretation of the resul
 
 ---
 
+## Snowflake dialect compatibility
+
+Write plain DuckDB SQL with the macros loaded (they arrive via `state.sql`, never a second
+`-init` — see `tools\ensure-duckdb-compat.ps1`). Reach for
+`polyglot_query('<sql>', 'snowflake')` when a construct fails with a `Catalog Error`, or when
+lifting SQL verbatim from Snowflake. Single quotes inside the wrapped string must be doubled,
+and `LOAD polyglot;` is required first — it does not autoload. `LOAD polyglot;` must come
+**before** the sandbox `SET enable_external_access=false` line in Step 5 above, or it fails
+`Permission Error: Loading external extensions is disabled through configuration`.
+
+Macros compose *inside* `polyglot_query` (`TO_VARCHAR(123)` returns `123` through the wrapper
+once the macros are loaded, and fails without them). Always surface
+`polyglot_transpile('<sql>', 'snowflake')` output when polyglot runs — it is a scalar function,
+not a table function — since polyglot has known wrong translations (`TRY_TO_NUMBER`, `TO_CHAR`
+format strings) and the transpiled SQL is part of the answer, not debug detail.
+
+See `skills/query/duckdb-compat.md` for the full macro inventory, the before/after fixture
+table, and the current residual list.
+
+---
+
 ## DuckDB Friendly SQL Reference
 
 When generating SQL, prefer these idiomatic DuckDB constructs:
