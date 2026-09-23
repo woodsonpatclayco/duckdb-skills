@@ -1,6 +1,11 @@
 # TASK — Dialect layer: macro file, polyglot routing, and a correctness fixture
 
-Plan: PLAN-1.md (item 1)
+Plan: PLAN-2.md (item 1)
+
+> **Round 2 is open.** The `Plan:` header moved from `PLAN-1.md` to `PLAN-2.md` because round 1
+> exposed a factual error in the plan itself. Read `# CORRECTIONS — round 2` at the bottom; where it
+> conflicts with the body above, **the corrections win.** The body is left unedited on purpose —
+> `RESULT-1.md` was written against it.
 
 **Serves:** Writing SQL against local files without tripping over DuckDB's dialect. Today Cortex Code
 writes Snowflake SQL fluently and DuckDB SQL badly — `IFF`, `NVL`, `DIV0`, `TRY_TO_NUMBER`,
@@ -426,3 +431,336 @@ to it.
 
 `RESULT-1.md` must include the AC6 before/after table and the AC6 raw-set reconciliation inline —
 those are the two outputs Phil reads to judge whether the dialect problem is actually fixed.
+
+---
+
+# CORRECTIONS — round 2
+
+Round 1 shipped working machinery with a dishonest fixture. `VERIFY-1.md` returned **DO NOT SHIP**,
+and it was right: two rows asserted what the macro produces as if it were Snowflake's answer, which
+is precisely what this deliverable exists to prevent. Both were then checked against a live
+Snowflake connection and both defects are confirmed real.
+
+**Nothing about the runner, the delivery script, or the macro-loading mechanics needs to change.**
+Every mechanical claim in `RESULT-1.md` was independently reproduced, the value/type comparison is
+live (mutation-tested two ways), and the `DATE_TRUNC str` discovery is a genuine finding that the
+old error-only probe could never have made. Keep all of it. What changes is fixture **content**, and
+one macro.
+
+## C1 — `TO_NUMBER` and `TRY_TO_NUMBER` must be scale 0, not scale 6
+
+Measured on CLAYCO-DATAHUB, with `SYSTEM$TYPEOF()`:
+
+| Expression | Snowflake value | Snowflake type |
+|---|---|---|
+| `TRY_TO_NUMBER('12.3')` | `12` | `NUMBER(38,0)` |
+| `TO_NUMBER('12.3')` | `12` | `NUMBER(38,0)` |
+| `TRY_TO_NUMBER('abc')` | `NULL` | — |
+
+Snowflake's `TO_NUMBER` / `TRY_TO_NUMBER` default to `NUMBER(38,0)`: no fractional digits, rounded
+half-away-from-zero. The seed's `DECIMAL(38,6)` silently **preserves** decimals production rounds
+away — on cost data, a query ported from Snowflake returns `12.3` locally where production returns
+`12`.
+
+**Change both macros to `DECIMAL(38,0)`.** Verified that DuckDB then agrees with Snowflake on every
+case tested:
+
+| input | Snowflake | DuckDB `TRY_CAST(x AS DECIMAL(38,0))` |
+|---|---|---|
+| `'12.3'` | `12` | `12` |
+| `'12.7'` | `13` | `13` |
+| `'-12.7'` | `-13` | `-13` |
+| `'12.5'` | `13` | `13` |
+| `''` | `NULL` | `NULL` |
+| `'abc'` | `NULL` | `NULL` |
+| `'1e3'` | `1000` | `1000` |
+
+`typeof` = `DECIMAL(38,0)`, which is the DuckDB rendering of `NUMBER(38,0)`.
+
+**AC3 in the body above is wrong and is superseded.** It asserted `12.300000` / `DECIMAL(38,6)`,
+which is the seed's behaviour, not Snowflake's. This was a spec defect, not an implementation one —
+the implementer built exactly what it was told.
+
+## C2 — every fixture row declares where its expectation came from
+
+Add **two** columns: `source` (sixth) and `note` (seventh, empty unless `source = deviation`). The
+header becomes `name, sql, expected_value, expected_type, check_mode, source, note`. The runner reads
+the fixture with `Import-Csv`, so extra columns need no parser change.
+
+`source` is exactly one of:
+
+- **`snowflake`** — the expectation is Snowflake's answer, taken from the measured table in C7.
+- **`deviation`** — the value is equal but DuckDB's **type kind** differs and cannot be reproduced:
+  fixed-point → floating (`NUMBER(4,3)` → `DOUBLE`), `ARRAY` → `INTEGER[]`, `OBJECT` → `STRUCT`,
+  `VARIANT` → a concrete type, or a precision that varies with input precision. **Requires a
+  non-empty `note` naming exactly what differs.**
+- **`duckdb-native`** — no Snowflake equivalent exists. Only `xl_date` qualifies.
+
+### The line `deviation` may not cross
+
+A length or precision difference inside the **same** type kind is not a deviation at all — it is the
+canonical rendering the body's type rule already defines (`VARCHAR(10)` → `VARCHAR`,
+`NUMBER(9,0)` → `BIGINT`). Those rows stay `snowflake`. Do not reclassify them; if you do, the
+verified count becomes meaningless because two readers will disagree by a dozen rows.
+
+**A row whose value differs, or whose type difference would produce a wrong answer downstream, is
+never a `deviation`.** It keeps `source = snowflake`, keeps Snowflake's answer as its expectation, and
+**fails**, appearing in the residual list. A row may not move from the residual list into the
+`deviation` set.
+
+`DATE_TRUNC str` is the worked counter-example. Snowflake returns `2026-07-01` / `DATE`; DuckDB
+returns `2026-07-01 00:00:00` / `TIMESTAMP`. Both are temporal types, so a loose reading of "type kind
+differs" would admit it — and admitting it would convert the single most valuable finding of round 1
+into a pass. It stays `snowflake` and stays failing. See C3.
+
+### Numeric values compare numerically
+
+Snowflake's fixed-point scale makes several expectations render differently from DuckDB's while being
+the same number: `MEDIAN(1)` is `1.000` on Snowflake and `1.0` on DuckDB. **When both the expected and
+actual values parse as decimal, compare numerically; otherwise compare as strings.** Without this the
+value check degenerates into a formatting check, and the only way to pass would be to copy DuckDB's
+rendering — the defect this round exists to remove. Type comparison stays an exact string match.
+
+### The `deviation` set
+
+Exactly these, each with a `note`: `DIV0`, `DIV0NULL`, `ARRAY_AGG`, `OBJECT_CONSTRUCT`, `MEDIAN`,
+`PERCENTILE_CONT`, `RATIO_TO_REPORT`, `FLATTEN`. Every one is justified by a measurement in C7. Any
+addition beyond these eight must be named in `RESULT-2.md` with its Snowflake measurement and its
+reason.
+
+`CURRENT_TIMESTAMP()` and `SEQ/UNIFORM` stay `check_mode = type_only` and `source = snowflake`:
+`TIMESTAMP_LTZ(9)` → `TIMESTAMP WITH TIME ZONE` and `NUMBER(2,0)` → `BIGINT` are canonical renderings.
+
+## C3 — `DATE_TRUNC str` keeps its `DATE` expectation
+
+Confirmed live: Snowflake's `DATE_TRUNC('month', DATE '2026-07-15')` returns `2026-07-01` typed
+`DATE`. DuckDB returns `TIMESTAMP` for `month`, `year`, `day` and `week`, polyglot's transpile is a
+pass-through to the same function, and there is no macro seam. **Do not weaken this row to
+`TIMESTAMP` to make it pass.** It is a true residual and the fixture is working correctly by failing
+it in all three modes.
+
+It follows that **raw = 16, not 17, is the correct number** and the body's AC6 expectation of 17 is
+superseded. The 17th construct was only ever passing because the old probe never checked types.
+
+## C4 — report the counts three ways, split by honesty
+
+The single pass count now overstates correctness, because `deviation` rows pass on a relaxed
+expectation. The runner must report, per mode: **verified** (passes whose `source` is `snowflake`),
+**deviation** (passes on a `deviation` or `duckdb-native` row), and **fail**. The three sum to the row
+total.
+
+The before/after table in `duckdb-compat.md` gains the `source` column so the distinction is visible
+where the numbers are read, and `VERIFY-1.md`'s finding — that at least 2 of 26 macro passes and 1 of
+33 polyglot passes were false positives — is recorded there as the reason the split exists.
+
+## C5 — the console header label
+
+Non-blocking, from `VERIFY-1.md`: the runner's stdout header prints `polyglot` where the spec asks for
+`polyglot (macros loaded)`. The correct label is already in `duckdb-compat.md`. Fix the header.
+
+## C6 — three more macros are wrong, and seven were never tested at all
+
+C2 audits the fixture; **seven of the 17 shipped macros have no fixture row**, so a defect in them is
+structurally invisible. `DIV0NULL`, `TO_NUMBER`, `TRY_TO_DATE`, `CHARINDEX`, `LEN`, `UUID_STRING` and
+`xl_date` ship untested. Three carry real defects, all measured on both engines:
+
+**`REGEXP_SUBSTR` returns `''` where Snowflake returns NULL.** Snowflake's no-match answer is NULL
+(measured: `IS_NULL`); DuckDB's `regexp_extract('abc','[0-9]+')` returns the empty string. DuckDB's
+CSV writer distinguishes NULL from empty, so this is a silently different answer that changes
+`COUNT()`, `IS NULL` filters and `NVL` chains. The existing fixture row only tests the matching case,
+so it passes and the defect ships. **Fix, verified:**
+
+```sql
+CREATE OR REPLACE MACRO REGEXP_SUBSTR(s, p) AS
+  CASE WHEN regexp_matches(s, p) THEN regexp_extract(s, p) END;
+```
+
+Measured: match → `123`, no-match → NULL, `typeof` → `VARCHAR`. Add a no-match fixture row and keep
+the matching one.
+
+**`UUID_STRING()` returns type `UUID`, not VARCHAR.** Snowflake returns `VARCHAR(36)`. This is the
+same disqualifying class as the TIMESTAMP drift that excluded `DATEADD`. **Fix, verified:**
+`CAST(uuid() AS VARCHAR)` → `typeof` `VARCHAR`, length 36.
+
+**`TRY_TO_DATE` disagrees with Snowflake on all-digit strings — the exact shape this project's
+workbook data uses.** Measured: Snowflake `TRY_TO_DATE('46204')` = **`1970-01-01`** (it reads digit
+strings as an epoch offset); DuckDB `TRY_CAST('46204' AS DATE)` = **NULL**. Both agree on
+`'2026-07-01'`. **Do not "fix" this and do not weaken the expectation.** Record Snowflake's answer,
+let the row fail, and document it in `duckdb-compat.md` as a known divergence — with the consequence
+stated plainly: **`xl_date()` is the correct tool for Excel serials and `TRY_TO_DATE` must not be used
+for them**, because on Snowflake `46204` silently becomes a 1970 date rather than NULL. PLAN-2's
+workbook section is built on serial `46204`, so this matters to item 4.
+
+**`DIV0` / `DIV0NULL` value correctness is reachable** — the body left this as "if you can", which is
+not an instruction. **Fix, verified:**
+
+```sql
+CREATE OR REPLACE MACRO DIV0(a, b) AS CAST(CASE WHEN b = 0 THEN 0 ELSE a / b END AS DECIMAL(38,6));
+CREATE OR REPLACE MACRO DIV0NULL(a, b) AS CAST(CASE WHEN b = 0 OR b IS NULL THEN 0 ELSE a / b END AS DECIMAL(38,6));
+```
+
+DuckDB's `/` always yields DOUBLE even with a decimal operand, so the outer cast is required.
+Measured: `DIV0(1,0)` → `0.000000`, `DIV0(10,4)` → `2.500000`, `typeof` → `DECIMAL(38,6)`,
+`DIV0NULL(1,NULL)` → `0.000000`. Values now match Snowflake exactly; only the precision digit
+(`NUMBER(7,6)`/`NUMBER(8,6)`) is unreachable, which is what makes these `deviation` rows.
+
+**Add a fixture row per untested macro.** Nine new rows, expectations from C7:
+
+| name | sql | expected_value | expected_type | source |
+|---|---|---|---|---|
+| `DIV0NULL` | `SELECT DIV0NULL(1,NULL) AS v` | `0.000000` | `DECIMAL(38,6)` | deviation |
+| `TO_NUMBER` | `SELECT TO_NUMBER('12.3') AS v` | `12` | `DECIMAL(38,0)` | snowflake |
+| `TRY_TO_DATE serial` | `SELECT TRY_TO_DATE('46204') AS v` | `1970-01-01` | `DATE` | snowflake |
+| `TRY_TO_DATE iso` | `SELECT TRY_TO_DATE('2026-07-01') AS v` | `2026-07-01` | `DATE` | snowflake |
+| `CHARINDEX` | `SELECT CHARINDEX('b','abc') AS v` | `2` | `BIGINT` | snowflake |
+| `LEN` | `SELECT LEN('abc') AS v` | `3` | `BIGINT` | snowflake |
+| `UUID_STRING` | `SELECT UUID_STRING() AS v` | *(type_only)* | `VARCHAR` | snowflake |
+| `REGEXP_SUBSTR no match` | `SELECT REGEXP_SUBSTR('abc','[0-9]+') AS v` | `NULL` | `VARCHAR` | snowflake |
+| `xl_date` | `SELECT xl_date(46204) AS v` | `2026-07-01` | `DATE` | duckdb-native |
+
+**The fixture is 50 rows from this round on** (41 + 9). Use 50 in AC10 and AC11.
+
+## C7 — Snowflake measurements, supplied rather than delegated
+
+The body lists "any Snowflake connection" as out of scope and says the fixture is entirely offline.
+**That bullet is superseded for expectations only.** The measurements were taken in the main session on
+CLAYCO-DATAHUB with `SYSTEM$TYPEOF()` and are reproduced here as facts. **Do not re-derive them, and
+do not infer any expectation from DuckDB's output.** The `[SBn]`/`[LOB]` suffixes are Snowflake
+internal storage hints and are not part of the type.
+
+| construct | Snowflake value | Snowflake type | canonical DuckDB `expected_type` |
+|---|---|---|---|
+| `IFF(1>0,'y','n')` | `y` | `VARCHAR(1)` | `VARCHAR` |
+| `NVL(NULL,'x')` | `x` | `VARCHAR(134217728)` | `VARCHAR` |
+| `NVL2(NULL,'a','b')` | `b` | `VARCHAR(1)` | `VARCHAR` |
+| `IFNULL(NULL,1)` | `1` | `NUMBER(1,0)` | `INTEGER` |
+| `ZEROIFNULL(NULL)` | `0` | `NUMBER(2,0)` | `INTEGER` |
+| `NULLIFZERO(0)` | `NULL` | `NUMBER(1,0)` | `INTEGER` |
+| `DECODE(1,1,'a',2,'b','c')` | `a` | `VARCHAR(1)` | `VARCHAR` |
+| `DIV0(1,0)` | `0.000000` | `NUMBER(7,6)` | `DECIMAL(38,6)` *(deviation)* |
+| `DIV0(10,4)` | `2.500000` | `NUMBER(8,6)` | `DECIMAL(38,6)` *(deviation)* |
+| `DIV0NULL(1,NULL)` | `0.000000` | `NUMBER(7,6)` | `DECIMAL(38,6)` *(deviation)* |
+| `DATEADD('day',1,DATE '2026-07-01')` | `2026-07-02` | `DATE` | `DATE` |
+| `DATEDIFF('day',…)` | `31` | `NUMBER(9,0)` | `BIGINT` |
+| `DATE_TRUNC('month',DATE '2026-07-15')` | `2026-07-01` | `DATE` | `DATE` |
+| `TO_VARCHAR(123)` | `123` | `VARCHAR` | `VARCHAR` |
+| `TO_CHAR(DATE '2026-07-15','YYYY-MM')` | `2026-07` | `VARCHAR` | `VARCHAR` |
+| `TRY_CAST('x' AS INT)` | `NULL` | `NUMBER(38,0)` | `INTEGER` |
+| `TRY_TO_NUMBER('12.3')` | `12` | `NUMBER(38,0)` | `DECIMAL(38,0)` |
+| `TO_NUMBER('12.3')` | `12` | `NUMBER(38,0)` | `DECIMAL(38,0)` |
+| `TRY_TO_DATE('46204')` | `1970-01-01` | `DATE` | `DATE` |
+| `TRY_TO_DATE('2026-07-01')` | `2026-07-01` | `DATE` | `DATE` |
+| `LISTAGG(x,',')` | `a,b` | `VARCHAR(134217728)` | `VARCHAR` |
+| `EQUAL_NULL(NULL,NULL)` | `TRUE` | `BOOLEAN` | `BOOLEAN` |
+| `'1'::NUMBER(10,2)` | `1.00` | `NUMBER(10,2)` | `DECIMAL(10,2)` |
+| `CAST(1 AS NUMBER(38,2))` | `1.00` | `NUMBER(38,2)` | `DECIMAL(38,2)` |
+| `CAST('a' AS VARCHAR(10))` | `a` | `VARCHAR(10)` | `VARCHAR` |
+| `'A' ILIKE 'a'` | `TRUE` | `BOOLEAN` | `BOOLEAN` |
+| `RATIO_TO_REPORT(1) OVER ()` | `1.000000` | `NUMBER(7,6)` | `DOUBLE` *(deviation)* |
+| `ARRAY_AGG(1)` | `[1]` | `ARRAY` | `INTEGER[]` *(deviation)* |
+| `OBJECT_CONSTRUCT('a',1)` | `{"a":1}` | `OBJECT` | `STRUCT(a INTEGER)` *(deviation)* |
+| `FLATTEN(...).value` | `1` | `VARIANT` | `INTEGER` *(deviation)* |
+| `CURRENT_TIMESTAMP()` | *(clock)* | `TIMESTAMP_LTZ(9)` | `TIMESTAMP WITH TIME ZONE` |
+| `SPLIT_PART('a.b','.',1)` | `a` | `VARCHAR(3)` | `VARCHAR` |
+| `REGEXP_SUBSTR('abc123','[0-9]+')` | `123` | `VARCHAR` | `VARCHAR` |
+| `REGEXP_SUBSTR('abc','[0-9]+')` | **`NULL`** | `VARCHAR` | `VARCHAR` |
+| `POSITION('b' IN 'abc')` | `2` | `NUMBER(9,0)` | `BIGINT` |
+| `MEDIAN(1)` | `1.000` | `NUMBER(4,3)` | `DOUBLE` *(deviation)* |
+| `PERCENTILE_CONT(0.5) …` | `1.000` | `NUMBER(4,3)` | `DOUBLE` *(deviation)* |
+| `UNIFORM(1,10,RANDOM())` | *(random)* | `NUMBER(2,0)` | `BIGINT` |
+| `CONCAT_WS('-','a','b')` | `a-b` | `VARCHAR(3)` | `VARCHAR` |
+| `1 IS DISTINCT FROM NULL` | `TRUE` | `BOOLEAN` | `BOOLEAN` |
+| `UUID_STRING()` | *(random)* | `VARCHAR(36)` | `VARCHAR` |
+| `LEN('abc')` | `3` | `NUMBER(18,0)` | `BIGINT` |
+| `CHARINDEX('b','abc')` | `2` | `NUMBER(9,0)` | `BIGINT` |
+
+`TRY_TO_NUMBER` rounding, measured on both engines and in agreement: `'12.3'`→`12`, `'12.7'`→`13`,
+`'-12.7'`→`-13`, `'12.5'`→`13`, `''`→NULL, `'abc'`→NULL, `'1e3'`→`1000`.
+
+Structural constructs (`QUALIFY`, `QUALIFY+PARTITION`, `GROUP BY position`, `TOP n`, `MINUS`,
+`LISTAGG WITHIN GROUP`, `VARCHAR(n)`) return the integer or string literal they select, typed
+`NUMBER(1,0)` → `INTEGER` or `VARCHAR(n)` → `VARCHAR`. Their existing expectations are already correct
+and need no change beyond setting `source = snowflake`.
+
+## Revised acceptance checks for round 2
+
+AC1, AC2, AC4, AC5, AC7, AC8, AC9 are **unchanged and already passed independently** — re-run them to
+confirm no regression, but they are not the point of this round.
+
+**AC6 is superseded by AC11.** Its derived `macro ≥ 28` / `polyglot ≥ 36` figures are **retired**: they
+were error-free counts from the old probe, never recorded per construct, and `RESULT-1.md` showed they
+cannot be reconciled exactly. Do not measure against them and do not report a shortfall against them.
+AC6's other outputs — the before/after table, the residual list, the PIN line — move into AC11
+unchanged, now carrying the `source` column.
+
+**AC3-R2 (supersedes AC3).**
+
+```powershell
+duckdb -init skills\query\duckdb-compat.sql -csv -c "SELECT TRY_TO_NUMBER('12.3') AS v, typeof(TRY_TO_NUMBER('12.3')) AS t, TRY_TO_NUMBER('12.7') AS r, TRY_TO_NUMBER('-12.7') AS rn, TRY_TO_NUMBER('abc') IS NULL AS abc_null, TO_NUMBER('12.3') AS tn"
+duckdb -init skills\query\duckdb-compat.sql -csv -c "SELECT DIV0(1,0) AS a, DIV0(10,4) AS b, typeof(DIV0(10,4)) AS t, DIV0NULL(1,NULL) AS c, REGEXP_SUBSTR('abc123','[0-9]+') AS m, REGEXP_SUBSTR('abc','[0-9]+') IS NULL AS nomatch_null, typeof(UUID_STRING()) AS u, length(UUID_STRING()) AS ulen"
+```
+
+Expected, first line: `12`, `"DECIMAL(38,0)"`, `13`, `-13`, `true`, `12`. Second line: `0.000000`,
+`2.500000`, `"DECIMAL(38,6)"`, `0.000000`, `123`, `true`, `VARCHAR`, `36`. Every value matches a C7
+measurement.
+
+**AC10 — no row carries an unmarked or unjustified expectation.**
+
+```powershell
+duckdb -csv -c "SELECT source, count(*) AS n FROM read_csv('skills/query/duckdb-compat-tests.csv') GROUP BY 1 ORDER BY 1"
+duckdb -csv -c "SELECT name, source, note FROM read_csv('skills/query/duckdb-compat-tests.csv') WHERE source <> 'snowflake' ORDER BY name"
+duckdb -csv -c "SELECT count(*) AS unclassified FROM read_csv('skills/query/duckdb-compat-tests.csv') WHERE source IS NULL OR source NOT IN ('snowflake','deviation','duckdb-native') OR (source='deviation' AND (note IS NULL OR note=''))"
+```
+
+Expected: `deviation` = **8**, `duckdb-native` = **1**, `snowflake` = **41**, total **50**; the second
+command lists exactly `ARRAY_AGG`, `DIV0`, `DIV0NULL`, `FLATTEN`, `MEDIAN`, `OBJECT_CONSTRUCT`,
+`PERCENTILE_CONT`, `RATIO_TO_REPORT` with non-empty notes, plus `xl_date` as `duckdb-native`;
+`unclassified` = **0**.
+
+Then run `git diff skills/query/duckdb-compat-tests.csv` and, for **every** row whose `expected_value`
+or `expected_type` changed from round 1, quote the C7 line that justifies it. A changed expectation
+with no measurement beside it is the round-1 defect recurring.
+
+**AC11 — the three-way split, reconciled row by row.** Run `tools\run-compat-tests.ps1 -Mode all`.
+Expected: three counts per mode summing to **50**, plus a reconciliation table against `RESULT-1.md`'s
+per-row verdicts naming **every** row whose verdict or classification changed, with the reason.
+
+The one figure derivable in advance, so a mismatch is visible: **raw verified over the original 41
+rows = 15.** Round 1 recorded 16 raw passes; `ARRAY_AGG` is one of them and is now a `deviation` row,
+so it is not a verified pass. C3's "raw = 16" is the *pass* count, not the verified count.
+
+Macro and polyglot verified counts are reported as measured and **will be lower than round 1's 26 and
+33** — that is the correction working. But a bare count is not acceptable: every point of difference
+must be attributable to a named row, either reclassified to `deviation` or corrected by C1/C6. Any
+residue that cannot be attributed to a named row must be reported as an unexplained gap.
+
+**AC12 — the fixture still catches a wrong answer.** On a copy under `.duckdb-skills\ac12\`, using the
+same rows `VERIFY-1.md` used so the movement is comparable: set `IFNULL`'s `expected_value` to `999`
+and confirm it flips to FAIL with raw verified 15 → 14; separately set `QUALIFY`'s `expected_type` to
+`VARCHAR` and confirm the same movement. Never mutate the tracked fixture.
+
+**AC13 — a semantic failure cannot be relabelled into a pass.** This is the guard on C2, and without
+it `deviation` is a one-word fix for any failing row. On a copy under `.duckdb-skills\ac13\`, set
+`DATE_TRUNC str` to `source=deviation`, `expected_type=TIMESTAMP`, `note=x`, and run `-Mode all`.
+Expected: the row is **not** counted as verified in any mode, and `DATE_TRUNC str` still appears in the
+residual list. State in `RESULT-2.md` which mechanism produced that outcome — an explicit rejection in
+the runner, or the row failing on value (`2026-07-01` vs `2026-07-01 00:00:00`). Either is acceptable;
+an unexamined pass is not.
+
+## What must not change
+
+- The runner's **tag-block** parsing, stderr handling, error-class matching, pin assertion,
+  malformed-row rejection, and `polyglot_transpile` emission. All verified working. C4's counting
+  split and C2's numeric value comparison are the only runner changes in scope.
+- `tools\ensure-duckdb-compat.ps1` in full. AC4's four cases and AC5 all passed independently.
+- The exclusion of `DATEADD`, and `xl_date` returning `DATE`.
+- `skills/query/SKILL.md`'s frontmatter — still untouched.
+- The `<project-id>` deferral. `PLAN-2.md` now defines the term, but item 1 still writes only to the
+  project-local `state.sql` and still prints the path it resolved. Do not implement the home-side
+  branch in this round.
+
+## Handoff
+
+Same branch, `item1-dialect-layer`. Commit before writing `RESULT-2.md`. `RESULT-2.md` must include
+the 50-row table with each row's `source`, the three-way counts per mode, the AC11 reconciliation, and
+the verbatim output of AC3-R2, AC10, AC11, AC12 and AC13.
