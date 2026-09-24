@@ -29,32 +29,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $registrySql = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..\skills\snowflake-extract\registry.sql'))
-
-function Get-ProjectId {
-    $gitRoot = $null
-    try { $gitRoot = & git rev-parse --show-toplevel 2>$null } catch { $gitRoot = $null }
-    if ($LASTEXITCODE -eq 0 -and $gitRoot) {
-        $root = ($gitRoot | Select-Object -First 1) -replace '/', '\'
-    } else {
-        $root = (Get-Location).Path
-    }
-    $full = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/')
-    $lower = $full.ToLowerInvariant()
-    $id = ($lower -replace '[\\/]', '-') -replace ':', ''
-    return $id
-}
-
-function Resolve-ExtractRoot([string]$ExplicitRoot) {
-    if ($ExplicitRoot) {
-        return [System.IO.Path]::GetFullPath($ExplicitRoot)
-    }
-    $projectId = Get-ProjectId
-    $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\extracts"))
-    if (-not (Test-Path -LiteralPath $default -PathType Container)) {
-        New-Item -ItemType Directory -Force -Path $default | Out-Null
-    }
-    return $default
-}
+. (Join-Path $scriptRoot 'dsk-paths.ps1')
 
 function Get-EffectiveWindowMinutes {
     $raw = $env:DSK_WINDOW_MINUTES
@@ -90,7 +65,7 @@ function Read-ExtractSidecar {
     if ($exitCode -ne 0 -or -not $csvLines -or $csvLines.Count -lt 2) {
         return [pscustomobject]@{ Ok = $false; Reason = 'unreadable sidecar'; Row = $null }
     }
-    $row = ($csvLines | ConvertFrom-Csv) | Select-Object -First 1
+    $row = (($csvLines -join "`n") | ConvertFrom-Csv) | Select-Object -First 1
     return [pscustomobject]@{ Ok = $true; Reason = $null; Row = $row }
 }
 
@@ -137,7 +112,12 @@ function Get-ExtractStatus {
 
 # --- main ---------------------------------------------------------------
 
-$resolvedRoot = Resolve-ExtractRoot $ExtractRoot
+try {
+    $resolvedRoot = (Resolve-ExtractRoot $ExtractRoot)[0]
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
+}
 $window = Get-EffectiveWindowMinutes
 $ceiling = Get-EffectiveCeilingMinutes
 
