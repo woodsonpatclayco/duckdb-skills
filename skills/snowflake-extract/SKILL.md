@@ -35,19 +35,53 @@ future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
    connection name), `database` = the database qualifier of the first
    `source_objects` entry (`CURRENT_DATABASE()` is empty on this connection). **Do
    not invent a value for any field; if one cannot be obtained, stop and report.**
-4. `COPY INTO @~/duckdb-skills/<project-id>/<name>__<8 hex>/ FROM (<query>)
+4. **Determine the query -- never issue a blind `SELECT *` without checking first.**
+   `COPY INTO ... FILE_FORMAT=(TYPE=PARQUET)` refuses to unload `TIMESTAMP_TZ` or
+   `TIMESTAMP_LTZ` columns, so the query must be built, not assumed. This step
+   applies to a whole-object `SELECT * FROM <object>` with exactly one entry in
+   `source_objects`; for a hand-written or multi-object query the author supplies
+   the projection and owns the same TZ risk described here.
+   - Split the fully-qualified source object into `<db>`/`<sch>`/`<obj>` and query
+     `<db>.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '<sch>' AND
+     TABLE_NAME = '<obj>' ORDER BY ORDINAL_POSITION`. **Bare `INFORMATION_SCHEMA`
+     fails `invalid identifier` on this connection** -- qualify with `<db>`, same
+     trap as `QUERY_HISTORY_BY_SESSION` below.
+   - If no column has `DATA_TYPE IN ('TIMESTAMP_TZ','TIMESTAMP_LTZ')`, the query
+     stays `SELECT * FROM <object>` -- unchanged for the common case.
+   - Otherwise build an explicit column list **in ordinal order** (this is what
+     makes the projection produce the same column set `SELECT *` would have):
+     every TZ/LTZ column projects as
+     `CONVERT_TIMEZONE('UTC', "<col>")::TIMESTAMP_NTZ AS "<col>"`; every other
+     column is named plainly. **Every column name is emitted double-quoted, in
+     both forms.** `COLUMN_NAME` comes back from `INFORMATION_SCHEMA.COLUMNS`
+     without its own quotes, so a bare identifier is a syntax error on a reserved
+     word or on any column actually created as a quoted identifier; double any
+     `"` that appears inside a `COLUMN_NAME`.
+   - **The resulting DuckDB type is a naive `TIMESTAMP` holding UTC**, not
+     `TIMESTAMPTZ` -- the same discipline as `materialized_at` applies: compare
+     against `timezone('UTC', now())`, never `now()`.
+   - **Re-derive the projection on every materialize, including every refresh --
+     never replay a stored column list.** An upstream column added after the
+     first materialize (including a new TZ column) would be silently dropped
+     otherwise. The extract's identity is its `name`, never its query text.
+   - **If `COPY INTO` still fails with a type-unload error after projection, stop
+     and report the column and its type. Do not widen the cast to make it pass.**
+     A TZ column nested inside another type is not caught by the check above,
+     and this is what turns that miss into a loud stop instead of a silent one.
+5. `COPY INTO @~/duckdb-skills/<project-id>/<name>__<8 hex>/ FROM (<query>)
    FILE_FORMAT = (TYPE = PARQUET) HEADER = TRUE OVERWRITE = TRUE`. Capture
    `rows_unloaded` -> `row_count` and `output_bytes`. The random 8-hex suffix means
    two sessions materializing the same name cannot collide on the stage.
-5. `GET @~/duckdb-skills/<project-id>/<name>__<suffix>/ 'file://<root>/<name>.new/'`.
-6. Look up `TOTAL_ELAPSED_TIME` for that `COPY INTO` via
+6. `GET @~/duckdb-skills/<project-id>/<name>__<suffix>/ 'file://<root>/<name>.new/'`.
+7. Look up `TOTAL_ELAPSED_TIME` for that `COPY INTO` via
    `<db>.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()`, `EXECUTION_STATUS = 'SUCCESS'`
    only, -> `runtime_seconds`. If unobtainable, omit the field and say so.
-7. `tools\publish-extract.ps1 -Name <name> -StagingDir <root>\<name>.new
-   -SidecarPath <path to the JSON built from steps 2-6> -ExtractRoot <root>`. It
+8. `tools\publish-extract.ps1 -Name <name> -StagingDir <root>\<name>.new
+   -SidecarPath <path to the JSON built from steps 2-7> -ExtractRoot <root>`. It
    stamps `sidecar_version`/`materialized_at`/`window_minutes`/`expires_at` itself --
-   do not include them.
-8. `REMOVE @~/duckdb-skills/<project-id>/<name>__<suffix>/` to stop the stage copy
+   do not include them. The sidecar's `query` records step 4's determined query
+   verbatim, using `\n` alone as the line separator.
+9. `REMOVE @~/duckdb-skills/<project-id>/<name>__<suffix>/` to stop the stage copy
    billing storage.
 
 ## Read (an extract already exists)
