@@ -32,32 +32,7 @@ param(
 $ErrorActionPreference = 'Continue'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $registrySql = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot '..\skills\snowflake-extract\registry.sql'))
-
-function Get-ProjectId {
-    $gitRoot = $null
-    try { $gitRoot = & git rev-parse --show-toplevel 2>$null } catch { $gitRoot = $null }
-    if ($LASTEXITCODE -eq 0 -and $gitRoot) {
-        $root = ($gitRoot | Select-Object -First 1) -replace '/', '\'
-    } else {
-        $root = (Get-Location).Path
-    }
-    $full = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/')
-    $lower = $full.ToLowerInvariant()
-    $id = ($lower -replace '[\\/]', '-') -replace ':', ''
-    return $id
-}
-
-function Resolve-ExtractRoot([string]$ExplicitRoot) {
-    if ($ExplicitRoot) {
-        return [System.IO.Path]::GetFullPath($ExplicitRoot), $false
-    }
-    $projectId = Get-ProjectId
-    $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\extracts"))
-    if (-not (Test-Path -LiteralPath $default -PathType Container)) {
-        New-Item -ItemType Directory -Force -Path $default | Out-Null
-    }
-    return $default, $true
-}
+. (Join-Path $scriptRoot 'dsk-paths.ps1')
 
 function Read-ExtractSidecar {
     param([string]$Dir, [string]$Name)
@@ -72,7 +47,7 @@ function Read-ExtractSidecar {
     if ($exitCode -ne 0 -or -not $csvLines -or $csvLines.Count -lt 2) {
         return [pscustomobject]@{ Name = $Name; Ok = $false; Reason = 'unreadable sidecar'; Row = $null }
     }
-    $row = ($csvLines | ConvertFrom-Csv) | Select-Object -First 1
+    $row = (($csvLines -join "`n") | ConvertFrom-Csv) | Select-Object -First 1
     return [pscustomobject]@{ Name = $Name; Ok = $true; Reason = $null; Row = $row }
 }
 
@@ -93,7 +68,12 @@ function Get-DirectoryBytes([string]$Dir, [string]$Filter) {
 
 # --- resolve root, guard the zero-extracts case -----------------------------
 
-$resolvedRoot, $usingDefault = Resolve-ExtractRoot $ExtractRoot
+try {
+    $resolvedRoot, $usingDefault = Resolve-ExtractRoot $ExtractRoot
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
+}
 
 if ($usingDefault) {
     Write-Output "project-id: $(Get-ProjectId)"

@@ -1,6 +1,11 @@
 # TASK — Materialize, publish, and refresh extracts (item 2b)
 
-Plan: PLAN-3.md (item 2, second of two specs)
+Plan: PLAN-4.md (item 2, second of two specs)
+
+> **Round 2 is open.** The `Plan:` header moved from `PLAN-3.md` to `PLAN-4.md` because round 1 found a
+> platform limitation the plan did not know about. Read `# CORRECTIONS — round 2` at the bottom; where it
+> conflicts with the body above, **the corrections win.** The body is left unedited on purpose —
+> `RESULT-1.md` was written against it.
 
 **Serves:** Actually getting Snowflake data onto local disk once and reusing it. Item 2a shipped the
 half that *reads* sidecars — the registry and freshness tools. This is the half that *writes* them: a
@@ -540,3 +545,241 @@ Verification runs in a `git worktree` at the final commit. The verifier **can** 
 `RESULT-1.md` must state `[command]` or `[skill]` per check with verbatim output, and inline: AC1's
 **both halves**, **every row** of AC4's table, AC7's three-way consistency per extract with the snapshots
 beside them, and AC10's two `QUERY_HISTORY` rows with their `QUERY_ID`s.
+
+---
+
+# CORRECTIONS — round 2
+
+Round 1 delivered working machinery. Sixteen of seventeen checks passed, the two publish mutation
+attacks confirmed the rename-aside is load-bearing rather than decorative, and the Snowflake half was
+**independently re-run by the main session** and holds: three-way row consistency 15,314 = 15,314 =
+15,314, a real-pipeline sidecar reading age **0** / `FRESH`, `PARENT_ACTUAL_START` typed `DATE`, zero
+subdirectories after publish, registry `bytes_check=AGREES`.
+
+**Nothing about `dsk-paths.ps1`, `publish-extract.ps1`, `extract-decide.ps1`, the CSV-parse fix, or the
+reader refactor needs to change.** Do not touch them beyond what C2 requires. This round closes one gap.
+
+## Why the verifier could not certify half of this round
+
+The `verifier` agent **does not have `snowflake_sql_execute`**, despite the round-1 brief telling it that
+it did, and has no `snow` CLI. So AC7–AC14 and half of AC15 came back **NOT RUN** — a verification gap,
+not a defect. The main session re-ran them instead.
+
+**Consequence for this round, and it is a standing rule now:** a `[skill]` check cannot be certified by
+the verifier. Write `RESULT-2.md` so the main session can re-run every `[skill]` check from the verbatim
+SQL and commands recorded in it. Quote the literal statements you ran, not a description of them.
+
+## C1 — the blocker was real, and so is the fix
+
+`COPY INTO ... FILE_FORMAT=(TYPE=PARQUET)` refuses TZ types. Reproduced independently:
+
+```
+Error encountered when unloading to PARQUET: TIMESTAMP_TZ and LTZ types are not
+supported for unloading to Parquet. value get: TIMESTAMP_LTZ
+```
+
+`DT_PROJECTS` carries two such columns, `START_DATE` and `FINISH_DATE`, both `TIMESTAMP_LTZ`. The spec
+required the query to be literally `SELECT * FROM <object>`, which cannot work on that table. **That was
+a spec defect, not an implementation defect** — the implementer stopped and asked rather than
+improvising, which was the right call.
+
+Blast radius, measured on `DB_CONTROL_TOWER.SCH_PROJECT_OPERATIONS`: **4 of 197 tables (2.0%)**, 10
+columns. Not rare by accident — `CURRENT_TIMESTAMP()` returns `TIMESTAMP_LTZ(9)`, so audit-stamped
+tables carry one.
+
+**The workaround, verified end to end by the main session:**
+
+```sql
+CONVERT_TIMEZONE('UTC', <col>)::TIMESTAMP_NTZ AS <col>
+```
+
+`COPY INTO` then succeeds, and the value round-trips losslessly: Snowflake's `2019-09-06 05:00:00.000`
+arrived in DuckDB as `2019-09-06 05:00:00` typed **`TIMESTAMP`**, matching Snowflake's own UTC rendering
+exactly.
+
+## C2 — the skill builds the query; it never issues a blind `SELECT *`
+
+`skills/snowflake-extract/SKILL.md`'s materialize flow gains a step **before** `COPY INTO`:
+
+1. Query `<db>.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '<sch>' AND TABLE_NAME = '<obj>' ORDER BY
+   ORDINAL_POSITION`, splitting `<db>`/`<sch>`/`<obj>` from the fully-qualified source object. **Bare
+   `INFORMATION_SCHEMA` fails `invalid identifier` on this connection** — the same reason
+   `QUERY_HISTORY_BY_SESSION` must be qualified (frozen body, "`runtime_seconds`, with a trap").
+2. If **no** column has `DATA_TYPE IN ('TIMESTAMP_TZ','TIMESTAMP_LTZ')`, the query stays
+   `SELECT * FROM <object>` — unchanged for the 98%, so this costs nothing there.
+3. Otherwise build an **explicit column list** in ordinal order, projecting only the TZ columns as
+   `CONVERT_TIMEZONE('UTC', "<col>")::TIMESTAMP_NTZ AS "<col>"` and naming every other column plainly.
+   **Do not cast anything else** — a blanket cast would be a second, unmeasured change.
+
+   **Every column name is emitted double-quoted**, in both the cast and the plain projections.
+   `COLUMN_NAME` comes back from `INFORMATION_SCHEMA.COLUMNS` **without** its quotes, so a bare
+   identifier is a syntax error on any column created as a quoted identifier and on any reserved word
+   — **`START` is reserved in Snowflake**, on a table that already has `START_DATE`. Quoting the exact
+   `COLUMN_NAME` is a no-op for ordinary upper-case names and correct for the rest; if a `COLUMN_NAME`
+   contains a `"`, double it.
+
+   **Ordinal order is required, not cosmetic**: it is what makes the projection produce the same
+   Parquet schema `SELECT *` would have. AC18's column-count assertion plus the first and last column
+   names quoted in `RESULT-2.md` are the evidence.
+4. Record that query verbatim in the sidecar's `query`, using `\n` alone as the line separator (not
+   `\r\n` — AC19 compares it against Snowflake's own record of it). `SIDECAR.md` requires byte-exact
+   round-trip, so what landed stays reconstructible from what the sidecar says was run. This is also
+   why round 1's multi-line CSV fix matters: a projected 113-column query **will** be multi-line.
+
+**The projection is re-derived on every materialize, including every refresh.** The sidecar's `query`
+records the projection used for *that* materialize, so it may legitimately differ between two refreshes
+of one extract if the source's columns changed — the extract's identity is its `name`, never its query
+text (`SIDECAR.md:11`). **Do not replay a stored explicit column list:** an upstream column added after
+the first materialize would be silently dropped, including a new TZ column, which would defeat the
+fail-loud rule below.
+
+**Scope of this rule:** it applies when the query is a whole-object `SELECT * FROM <object>` with
+exactly one entry in `source_objects`. For a hand-written or multi-object query the author supplies the
+projection and is responsible for TZ columns; state the same limitation and the same failure mode in the
+skill text.
+
+**This step runs inside the materialize flow only**, which already starts a warehouse for `COPY INTO`.
+AC10's zero-warehouse-cost proof for the *freshness check* is therefore unaffected — worth saying,
+because it is the non-obvious reason this addition is safe.
+
+State in the skill text that **the resulting DuckDB type is a naive `TIMESTAMP` holding UTC**, not
+`TIMESTAMPTZ`, and that the same UTC-comparison discipline applies as for `materialized_at` — compare
+against `timezone('UTC', now())`, never `now()`.
+
+**Failure mode to state explicitly:** if `COPY INTO` still fails with a type-unload error after
+projection, **stop and report the column and its type.** Do not widen the cast to make it pass.
+
+## C3 — `RESULT-2.md` must name who approved what
+
+Round 1's `RESULT-1.md` said *"you chose to skip dt_projects"*. Phil confirms he **was** asked directly —
+the implementer used `ask_user_question` and acted on a real answer. No fabrication. But the phrasing
+read as an invented approval, because the main session made no such call and no artifact recorded one.
+
+**Rule: when a subagent asks Phil something mid-run, `RESULT-<n>.md` must record the mechanism, the
+question, and the answer** — "asked Phil via `ask_user_question`: *<question>*; he answered *<answer>*".
+Never "you chose", which is ambiguous about who was asked and leaves a reader unable to distinguish a
+real approval from a fabricated one.
+
+## Revised acceptance checks
+
+AC1–AC6 and AC16–AC17 are **unchanged and already passed independently** — re-run to confirm no
+regression. AC8–AC14 are unchanged in substance but must now record verbatim SQL per the rule above.
+
+**AC7-R2 (supersedes AC7) — materialize both pinned objects, including the TZ one.**
+
+- `parent_projects` over `DT_PARENT_PROJECTS`: no TZ columns, so the query stays
+  `SELECT * FROM DB_CONTROL_TOWER.SCH_PROJECT_OPERATIONS.DT_PARENT_PROJECTS`. Confirmed working by the
+  main session — `rows_unloaded` 15,314, 7 files.
+- `dt_projects` over `DT_PROJECTS`: **113 columns, two of them `TIMESTAMP_LTZ`.** The query must be the
+  generated explicit projection. Quote the generated SQL in full — it is the artifact this round exists
+  to produce.
+
+Gate is internal consistency, unconditionally: `rows_unloaded` = sidecar `row_count` =
+`duckdb -csv -c "SELECT count(*) FROM '<dir>/*.parquet'"`. Snapshots to quote beside it, **not** assert:
+15,314 and **42,167** (the most recent observation; 42,162 the day before — both are drifting dynamic
+tables, so a difference is drift to report). Assert only that the directory holds **more than one**
+`.parquet` file — the count varies with unload parallelism (8, then 6, then 7 observed).
+
+Also: `LIST @~/duckdb-skills/…` returns **0 rows** after each `REMOVE`.
+
+**AC18 [skill] — the TZ columns land as usable timestamps, at the right instant.**
+
+```powershell
+duckdb -csv -c "SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM '<dir>/*.parquet') WHERE column_name IN ('START_DATE','FINISH_DATE')"
+duckdb -csv -c "SELECT count(*) AS ncols FROM (DESCRIBE SELECT * FROM '<dir>/*.parquet')"
+```
+
+Expected: both columns typed **`TIMESTAMP`** (not VARCHAR, not `TIMESTAMP WITH TIME ZONE`), and `ncols`
+**equal to the row count of C2 step 1's `INFORMATION_SCHEMA.COLUMNS` query** — quote both numbers. A
+short projection is a silent column loss, and internal row-count consistency cannot detect it.
+
+Then prove the **instant**, with a reference that does **not** reuse the projection — comparing
+`CONVERT_TIMEZONE(...)` against `CONVERT_TIMEZONE(...)` would pass on a timezone-shifted value, which is
+exactly the bug worth catching. Pick three rows by an identifying key (name the key in `RESULT-2.md`):
+
+```sql
+SELECT <key>, DATE_PART(EPOCH_SECOND, START_DATE) AS epoch_s
+FROM DB_CONTROL_TOWER.SCH_PROJECT_OPERATIONS.DT_PROJECTS
+WHERE <key> IN (<three literal keys>) ORDER BY <key>
+```
+```powershell
+duckdb -csv -c "SELECT <key>, epoch(START_DATE)::BIGINT AS epoch_s FROM '<dir>/*.parquet' WHERE <key> IN (<three literal keys>) ORDER BY <key>"
+```
+
+Expected: `epoch_s` **equal per key**, at second granularity. DuckDB's `epoch()` reads a naive
+`TIMESTAMP` as UTC, so equality proves the landed value is the correct instant rather than merely
+self-consistent. **A difference that is an exact multiple of 3600 is a timezone shift — stop and report
+it, do not adjust the comparison.** Also show `count(START_DATE)` is non-zero and min/max are plausible
+project dates, not 1970 or NULL.
+
+*Note: `TIMESTAMP_LTZ(9)` is nanosecond and DuckDB `TIMESTAMP` is microsecond, so sub-microsecond
+precision truncates. Irrelevant to whole-second project dates, hence the second granularity above.*
+
+**AC19 [skill] — the projection is recorded, not lost.** "Byte-identical to what was executed" needs a
+reference other than the sidecar itself, or it cannot fail. Retrieve the `COPY INTO`'s `QUERY_TEXT` from
+`<db>.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()` for the `QUERY_ID` AC14 already quotes, extract the
+`FROM ( … )` body, and show it is **identical to the sidecar's `query`** after normalising `\r\n` to
+`\n` on both sides — quote both strings in full. Show the sidecar's `query` contains
+`CONVERT_TIMEZONE('UTC', "START_DATE")::TIMESTAMP_NTZ` and the same for `FINISH_DATE`. Then confirm
+`tools\extract-status.ps1 -Name dt_projects` prints a **numeric** first line — round 1's CSV fix holding
+under a realistic 113-column multi-line payload rather than a one-line fixture.
+
+**AC20 [skill] — a non-TZ table is untouched by the new step.** This must be tied to a **fresh**
+materialize: the round-1 sidecar already on disk satisfies the literal check, so as a bare string
+comparison it passes before any round-2 work is done.
+
+After AC7-R2 re-materializes `parent_projects` through the projection-aware flow, quote its sidecar's
+`materialized_at` and show it is **later than the value present before this round began** — quote both.
+Then show its `query` is exactly
+`SELECT * FROM DB_CONTROL_TOWER.SCH_PROJECT_OPERATIONS.DT_PARENT_PROJECTS` (fully qualified; `RESULT-1.md`
+abbreviated this when transcribing — do not copy the abbreviation), with no projection and no casts.
+Also quote the `INFORMATION_SCHEMA.COLUMNS` evidence that drove the decision: **zero** TZ columns for
+`DT_PARENT_PROJECTS` against **two** for `DT_PROJECTS`. Without that, the rule is indistinguishable from
+special-casing two table names.
+
+**AC15-R2 (supersedes AC15)** — now runnable in full. Both extracts listed by name with row counts, ages
+and `bytes_check`; `dt_projects`' `parquet_glob` resolved **from the registry by name** and counted with
+no Snowflake call. Then **delete `parent_projects` specifically**, show the registry drops it, and
+re-materialize it.
+
+**`dt_projects` must survive the round intact** — AC18 reads its Parquet and AC19 its sidecar, and both
+must stay re-runnable by the main session after the implementer exits. Deleting it would destroy the
+evidence for this round's whole purpose. Quote `list-extracts.ps1` a final time showing both present.
+
+## Handoff
+
+Same branch, `item2b-snowflake-extract`. Commit before writing `RESULT-2.md`.
+
+**Supersedes the frozen body's "Verification runs in a `git worktree`" paragraph, which is now known
+false.** The verifier has **no** `snowflake_sql_execute` and no `snow` CLI; it cannot materialize and
+cannot run any `[skill]` check. Its scope is **AC1–AC6, AC16, AC17**, plus the local-artifact halves of
+AC19 and AC20 — and for those it must pass
+`-ExtractRoot C:\Users\woodsonp\.duckdb-skills\c-users-woodsonp-claude-dev-duckdb-skills\extracts`
+(the main tree's root, read-only), because a worktree's `<project-id>` resolves elsewhere. It must write
+`VERIFY-2.md` recording every `[skill]` check as **NOT RUN, tool unavailable**, naming them, so the gap
+is on disk rather than implied. The main session then re-runs the `[skill]` checks from the verbatim SQL
+in `RESULT-2.md` and appends its findings to `VERIFY-2.md`, marked as a main-session re-run.
+
+**Round 1's accepted deviations are contract now — do not change them and do not re-report them:**
+absolute `-ExtractRoot` when re-running 2a's checks (the relative-path rejection makes 2a's literal
+invocations unrunnable), the `try/catch` added to both readers for a clean exit 2, and publish's exit 1
+(runtime failure) / exit 2 (leftover `.old`/`.new`) classes.
+
+**Known gap, recorded rather than closed:** every `extract-decide.ps1` fixture is single-object, so the
+multi-object stage-1/stage-2 rule and round 1's `@(… | ConvertFrom-Json)` nesting fix have no passing
+evidence. Deferred deliberately; state it in `RESULT-2.md` so a later round does not assume it passed.
+
+For the re-run checks (AC1–AC6, AC8–AC14, AC16, AC17): a **PASS/FAIL line per check**, plus verbatim
+output only where it differs from `RESULT-1.md`.
+
+`RESULT-2.md` must include:
+
+- the **generated `dt_projects` projection SQL in full**, with its first and last column names called out
+- the **new `SKILL.md` section quoted verbatim**, plus `git diff -- skills/snowflake-extract/SKILL.md`
+  showing nothing else in that file changed. **The text must state the rule generically — by column
+  type, not by table name — and must not name `DT_PROJECTS`, `START_DATE` or `FINISH_DATE` as special
+  cases.** The skill text is the deliverable; one successful execution by an implementer who already
+  knows the rule proves nothing about whether the next session can follow it.
+- AC18's `ncols`-versus-`INFORMATION_SCHEMA` count and the three-key epoch comparison
+- AC19's two query strings in full
+- verbatim SQL for every `[skill]` check, so the main session can re-run them — the verifier cannot
