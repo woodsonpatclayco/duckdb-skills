@@ -36,12 +36,23 @@ $ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-if (-not (Test-Path -LiteralPath $WorkbookPath -PathType Leaf)) {
-    Write-Output "ERROR: workbook not found: $WorkbookPath"
+# Test-Path and GetFullPath both THROW on a path containing characters illegal on
+# Windows (`<`, `>`, `|`, `"`), rather than returning false. Under
+# $ErrorActionPreference = 'Stop' that surfaces as a raw .NET stack trace and the
+# clean message below is never reached. Catch it, so an unusable path is reported
+# the same way a missing one is: one line, naming the path, exit 1.
+try {
+    $exists   = Test-Path -LiteralPath $WorkbookPath -PathType Leaf
+    $fullPath = [System.IO.Path]::GetFullPath($WorkbookPath)
+} catch {
+    Write-Output "ERROR: not a usable file path: $WorkbookPath ($($_.Exception.Message))"
     exit 1
 }
 
-$fullPath = [System.IO.Path]::GetFullPath($WorkbookPath)
+if (-not $exists) {
+    Write-Output "ERROR: workbook not found: $WorkbookPath"
+    exit 1
+}
 
 $zip = $null
 $xmlText = $null
