@@ -39,6 +39,13 @@ FROM read_xlsx(
 );
 
 -- AC5: view row count vs. a direct read_xlsx(all_varchar=true) count, same run.
+-- Relabelled by item 5 (deliverable 4): contract_view now reads with
+-- stop_at_empty=false plus an explicit all-null-row filter (the read rule), while
+-- direct_varchar below is still a plain default read. The two agreeing is no longer
+-- just an item-4-era sanity check -- it is now the orphan-column / truncation
+-- detector item 5's harness (tools/run-assertions.ps1) also computes independently
+-- for every contract. Both are 62,230 as of 2026-09-25 (committed 2026-09-24: 62,110;
+-- see RESULT-1.md) -- drift to report, not a defect; the two paths still agree.
 SELECT 'AC5_VIEW_ROWS', count(*) FROM contract_view;
 SELECT 'AC5_DIRECT_ROWS', count(*) FROM direct_varchar;
 
