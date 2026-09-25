@@ -27,6 +27,16 @@ CurrentDirectory, which PowerShell's `cd` does not keep in sync -- this bit a
 verifier mid-run in item 2a. Rejecting relative paths outright is the fix;
 callers must pass absolute paths (e.g. via (Resolve-Path ...).Path or a
 $PWD-based Join-Path).
+
+Resolve-LakeRoot (item 6): same shape and same relative-path rejection as
+Resolve-ExtractRoot, for tools\materialize.ps1 and tools\lake-status.ps1. The
+default root is ~\.duckdb-skills\<project-id>\lake -- a sibling of
+extracts\ under the same per-project home directory, never inside the git
+repo itself (the repo's own .duckdb-skills\ stays reserved for
+ensure-duckdb-compat.ps1's state.sql). Returns a (string, bool) tuple: the
+resolved lake root directory, and whether the default was used. Callers derive
+the catalog file as "$root\lake.ducklake" and DATA_PATH as "$root\data"
+themselves -- this function only resolves and creates the root directory.
 #>
 
 function Get-ProjectId {
@@ -52,6 +62,25 @@ function Resolve-ExtractRoot([string]$ExplicitRoot) {
     }
     $projectId = Get-ProjectId
     $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\extracts"))
+    if (-not (Test-Path -LiteralPath $default -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $default | Out-Null
+    }
+    return $default, $true
+}
+
+function Resolve-LakeRoot([string]$ExplicitRoot) {
+    if ($ExplicitRoot) {
+        if (-not [System.IO.Path]::IsPathRooted($ExplicitRoot)) {
+            throw '-LakeRoot must be an absolute path'
+        }
+        $resolved = [System.IO.Path]::GetFullPath($ExplicitRoot)
+        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+        }
+        return $resolved, $false
+    }
+    $projectId = Get-ProjectId
+    $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\lake"))
     if (-not (Test-Path -LiteralPath $default -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $default | Out-Null
     }
