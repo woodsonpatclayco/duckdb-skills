@@ -86,27 +86,74 @@ FROM (
 -- the @rows_floor and @sheet directives above: a floor (>= 50,000 -- the lowest ever
 -- observed for this sheet is 57,801) and the internal-consistency equality (this
 -- view's row count against an independent with-data count over every raw column the
--- sheet returns, in the same run). The absolute count is reported context, not a gate.
+-- sheet returns, in the same run). The absolute count is reported context, not a gate
+-- -- see the @snapshot rows below.
 
--- Per-column non-null floors, measured individually -- never templated from another
--- column. Committed 2026-09-24. NOTE (recorded 2026-09-25, per TASK.md's drift
--- policy -- never adjust a figure to make a check pass): the live sheet has grown to
--- 62,230 rows since these were committed, so all three of the counts below now
--- undercount the live data and these three assertions are expected to FAIL today.
--- That is drift to report, not a defect in the contract; see RESULT-1.md.
--- @assert jobcosts_nn: (SELECT count(JOB_COSTS) FROM contract_view) = 62110
--- @assert vendorname_nn: (SELECT count(VENDOR_NAME) FROM contract_view) = 51928
--- @assert glperiod_nn: (SELECT count(GL_PERIOD) FROM contract_view) = 18764
+-- Round 2, C1 -- every assertion below is reclassified into exactly one of three kinds
+-- (TASK.md CORRECTIONS section). Round 1 left four hard-equality snapshot @assert
+-- lines in place (jobcosts_nn, vendorname_nn, glperiod_nn, jobcosts_sum) because
+-- deliverable 4 named only row_count; the workbook then refreshed again and all four
+-- failed on live data for the same reason row_count once did. This round removes that
+-- whole class rather than patching the instance:
+--
+--   INVARIANT (a relationship, never a literal -- refresh-proof):
+--     - anchor completeness, count(JOB_COSTS) = count(*): this is what the
+--       "@sheet"-family @anchor directive (JOB_COSTS, above) already computes and
+--       reports as the ANCHOR,... line. It REPLACES jobcosts_nn outright; no new
+--       assert line is needed, since the harness already runs this exact
+--       relationship for every contract's declared anchor.
+--     - glperiod_is_date (below, unchanged): GL_PERIOD decodes to a real DATE.
+--     - the consistency equality (view rows = with-data rows over all sheet columns,
+--       CONSISTENCY_VIEW_ROWS vs TRUNCATION_WITHDATA_ROWS): already computed by the
+--       harness for every contract, unchanged by this round.
+--     - jobcosts_sum_exact_decimal (below, new): the sum has no floating-point tail.
+--       This is a property of the DECIMAL(18,2) cast on JOB_COSTS above and cannot
+--       drift with the row count, unlike the sum's own value.
+--
+--   FLOOR (a measured ratio with justified headroom -- survives growth and ordinary
+--   shrink; still gates the exit code, unlike a snapshot):
+--     - vendorname_ratio_floor (below, new) replaces vendorname_nn: >= 0.80 -- observed
+--       0.83607 (2026-09-24) and 0.83620 (2026-09-25), stable across a refresh that
+--       moved every absolute count.
+--     - glperiod_ratio_floor (below, new) replaces glperiod_nn: >= 0.25 -- observed
+--       0.30211 and 0.30345 across the same refresh.
+--     - the existing @rows_floor: 50000 directive above, unchanged.
+--
+--   SNAPSHOT (reported as a SNAPSHOT,<name>,<value> context line, never gating the
+--   exit code -- exactly the category jobcosts_sum, jobcosts_nn, vendorname_nn and
+--   glperiod_nn should have been in round 1): rows, jobcosts_nn, vendorname_nn,
+--   glperiod_nn, and jobcosts_sum, all declared via @snapshot / @snapshot_committed
+--   pairs below. Phil ties SUM(JOB_COSTS) to a report; its value must stay visible
+--   even though the assertion protecting it is now about the cast, not the number.
+--
+-- One assertion is deleted outright rather than reclassified: glperiod_range (the
+-- hard `min = 2026-07-01 AND max = 2026-10-01` equality). It adds nothing beyond what
+-- two stronger, already-committed checks already prove: glperiod_is_date (below) that
+-- the column decodes to a real DATE, and checks/gl-facts.sql's AC8 that xl_date's
+-- decoding agrees with DuckDB's own independent decoder row-for-row (not just on
+-- aggregates). A literal min/max window is exactly the kind of absolute figure this
+-- round exists to stop gating on, and unlike the four counts above it has no ratio
+-- form -- so it is dropped rather than turned into a floor that would have to be
+-- re-guessed with no justification.
+-- @assert jobcosts_sum_exact_decimal: (SELECT typeof(sum(JOB_COSTS)) FROM contract_view) LIKE 'DECIMAL%'
+-- @assert vendorname_ratio_floor: (SELECT count(VENDOR_NAME)::DOUBLE / count(*) FROM contract_view) >= 0.80
+-- @assert glperiod_ratio_floor: (SELECT count(GL_PERIOD)::DOUBLE / count(*) FROM contract_view) >= 0.25
 
--- GL_PERIOD type and range. any_value() is required: an un-aggregated typeof() would
--- return one row per record and trip the one-row assertion rule. Re-measured
--- 2026-09-25: the date range has not drifted even though row counts have.
+-- GL_PERIOD type. any_value() is required: an un-aggregated typeof() would return one
+-- row per record and trip the one-row assertion rule.
 -- @assert glperiod_is_date: (SELECT any_value(typeof(GL_PERIOD)) FROM contract_view) = 'DATE'
--- @assert glperiod_range: (SELECT min(GL_PERIOD) = DATE '2026-07-01' AND max(GL_PERIOD) = DATE '2026-10-01' FROM contract_view)
 
--- Money sum, cast first -- committed 2026-09-24: 22454928166.83. See checks/gl-facts.sql
--- AC9 for the no-floating-point-tail comparison against the same sum taken without
--- all_varchar; that comparison is not asserted here because it needs a second read path
--- (`bare`) this file deliberately does not define. NOTE (2026-09-25): expected to FAIL
--- today -- the live sum has moved to 22478661033.93 with the row-count growth above.
--- @assert jobcosts_sum: (SELECT sum(JOB_COSTS) FROM contract_view) = 22454928166.83
+-- Snapshots (round 2, C2): reported unconditionally, gate nothing. Committed values
+-- below are this session's own baseline (2026-09-25, workbook hash
+-- A9CFF71AC5CBC83CB792676CB12AB317FEAE9BDFCB734BD11F208FFB29BA33E3) -- a mismatch on a
+-- future run is drift to observe via SNAPSHOT_DRIFT, not a failure.
+-- @snapshot rows: (SELECT count(*) FROM contract_view)
+-- @snapshot_committed rows: 62230
+-- @snapshot jobcosts_nn: (SELECT count(JOB_COSTS) FROM contract_view)
+-- @snapshot_committed jobcosts_nn: 62230
+-- @snapshot vendorname_nn: (SELECT count(VENDOR_NAME) FROM contract_view)
+-- @snapshot_committed vendorname_nn: 52037
+-- @snapshot glperiod_nn: (SELECT count(GL_PERIOD) FROM contract_view)
+-- @snapshot_committed glperiod_nn: 18884
+-- @snapshot jobcosts_sum: (SELECT sum(JOB_COSTS) FROM contract_view)
+-- @snapshot_committed jobcosts_sum: 22478661033.93

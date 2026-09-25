@@ -441,3 +441,147 @@ not chain `git push` onto the commit — push separately, with an explicit timeo
 `RESULT-1.md` must record: exact commands and output for AC0–AC16; mutation evidence both directions
 for all five mutations; committed vs observed for every figure with any live drift named; the workbook
 hash and mtime before and after; and anything not verified, named plainly rather than omitted.
+
+---
+
+# CORRECTIONS — round 2
+
+Round 1 shipped the harness and both contracts, and 12 of 17 checks passed clean. The other five did
+not fail because the harness is wrong — they failed because **the workbook refreshed overnight** and
+item 4's contract asserts absolute snapshots by equality.
+
+Confirmed independently, live file now `2026-09-25 08:48:13` (was `2026-09-24 09:38:56`):
+
+| figure | committed | observed 2026-09-25 |
+|---|---|---|
+| GL rows | 62,110 | **62,230** |
+| `JOB_COSTS` non-null | 62,110 | **62,230** |
+| `VENDOR_NAME` non-null | 51,928 | **52,037** |
+| `GL_PERIOD` non-null | 18,764 | **18,884** |
+| `SUM(JOB_COSTS)` | 22,454,928,166.83 | **22,478,661,033.93** |
+| `All_Sales_Data` rows | 219 | 219 — unchanged |
+
+The implementer correctly refused to edit those figures to make checks pass, and said so. That was the
+right call and it exposed a defect in this spec, not in the work.
+
+## C1 — I corrected an instance; the defect is a class
+
+This spec's deliverable 4 named **only** `row_count` as the hard-equality assertion to replace. But
+`jobcosts_nn`, `vendorname_nn`, `glperiod_nn` and `jobcosts_sum` have exactly the same defect, and the
+same reasoning condemns all five. Leaving four in place means the harness reports `failures=4` on every
+refresh forever — a monitor that always cries wolf is worse than none, because it trains you to ignore
+it.
+
+**The ratios are stable where the counts are not.** Measured across the refresh that moved every count:
+
+| column | ratio 09-24 | ratio 09-25 |
+|---|---|---|
+| `JOB_COSTS` | **1.00000** | **1.00000** |
+| `VENDOR_NAME` | 0.83607 | 0.83620 |
+| `GL_PERIOD` | 0.30211 | 0.30345 |
+
+So every assertion in every contract must be reclassified into one of three kinds, and the kind
+determines the form:
+
+**Invariants — assert as a relationship, never a literal. Refresh-proof.**
+
+- anchor completeness: `count(<anchor>) = count(*)` — measured to hold exactly across the refresh where
+  `= 62110` did not. This replaces `jobcosts_nn`.
+- `(SELECT any_value(typeof(GL_PERIOD)) FROM contract_view) = 'DATE'`
+- consistency: view rows = with-data rows over all sheet columns
+- the money sum has **no floating-point tail** — the AC9 property from items 3+4, which is a property of
+  the cast and cannot drift
+
+**Floors — measured ratios with justified headroom. Survive growth and ordinary shrink.**
+
+| contract | assertion | floor | headroom |
+|---|---|---|---|
+| GL | rows | ≥ **50,000** | lowest ever observed 57,801 |
+| GL | `VENDOR_NAME` non-null ratio | ≥ **0.80** | observed 0.836 twice |
+| GL | `GL_PERIOD` non-null ratio | ≥ **0.25** | observed 0.302, 0.303 |
+| `All_Sales_Data` | rows | ≥ **200** | observed 227, 226, 219 |
+| `All_Sales_Data` | `Job #` | `count = count(*)` — anchor invariant | 219 of 219 |
+| `All_Sales_Data` | `Revenue Total` ratio | ≥ **0.85** | observed 0.918 |
+| `All_Sales_Data` | `End Date` ratio | ≥ **0.55** | observed 0.662 |
+| `All_Sales_Data` | `match project` ratio | ≥ **0.90** | observed 0.977 |
+
+**Snapshots — reported, never asserted.** Absolute row counts, absolute non-null counts, and the money
+sum itself. Emit them as `check_id,value` context lines so Phil can tie the sum to a report, and so
+drift is visible. A snapshot must never gate the exit code.
+
+`SUM(JOB_COSTS)` is the clearest case: Phil ties it to a report, so its **value** must be printed
+prominently, and its **assertion** is that the cast produced an exact decimal.
+
+## C2 — the acceptance checks must stop gating on snapshots
+
+AC7 and AC9 currently pin absolute counts and sums as gates, which is the same defect one level up.
+Revised: they assert the invariants and floors, and **report** the snapshots side by side with the
+committed values. AC0/AC1's `failures=0` becomes reachable again and stays reachable.
+
+This also resolves the contradiction the reviewer flagged between deliverable 4's "every committed
+figure must be unchanged" and the drift policy. The correct statement: **the correction must not change
+what the contract computes.** Whether the underlying sheet moved is not the correction's business.
+
+## C3 — re-baseline the workbook control
+
+AC15's own rule says a changed hash with a later `LastWriteTime` is a SharePoint sync: report and
+re-baseline. Doing that. New baseline:
+
+```
+A9CFF71AC5CBC83CB792676CB12AB317FEAE9BDFCB734BD11F208FFB29BA33E3
+2026-09-25 08:48:13
+```
+
+The round-1 mismatch was a sync that predates the session, not a write by it. AC15 behaved correctly
+and passes.
+
+## C4 — the orphan-column fixture is blessed, and must be committed
+
+Round 1 had to build a purpose-built 3-column fixture to demonstrate the projected-columns mutation,
+because neither real contract has an orphan column today. That is correct and unavoidable — it is the
+same reason fixture A exists. Promote it to **fixture C**, built by
+`tools\make-truncation-fixtures.ps1` and committed, so the verifier reproduces it rather than
+improvising. Its shape: three columns, last data row populated **only** in the third.
+
+Expected, measured: default read 3, with-data over all three columns **3** (agrees — nothing lost),
+with-data over the two projected columns **2** (the row is dropped), anchor non-null among survivors
+**2** (assertion still passes). That triple is what proves the predicate must span every column.
+
+## Revised acceptance checks
+
+Unchanged: AC2, AC3, AC4, AC5, AC6, AC8, AC10, AC11, AC12, AC13, AC14, AC16.
+
+**AC0′ / AC1′** As before, and `SUMMARY,...,failures=0` must now hold — on the live sheet, whatever it
+has drifted to. Quote the summary line.
+
+**AC7′** The GL correction changes nothing the contract *computes*: `FINGERPRINT,MATCH`; the consistency
+equality holds; the anchor invariant `count(JOB_COSTS) = count(*)` holds; the sum has no floating-point
+tail; all three floors pass. **Report** rows, the three non-null counts, and the sum as snapshots with
+committed and observed side by side — no snapshot gates the exit code.
+
+**AC9′** `All_Sales_Data`: 16 columns, the anchor invariant on `Job #`, all four ratio floors pass, and
+`xl_date` range within **2023-07-15**–**2027-03-15** unless the sheet has genuinely extended, in which
+case report it. Report the absolute counts and both sums as snapshots.
+
+**AC17 (new)** *Refresh-proofing, demonstrated.* Show that the reclassified assertions survive a row
+count change, by running the harness against a copy of a contract pointed at fixture A and again after
+adding a data row to the fixture: the invariants and floors pass both times, and only the snapshot
+values differ. This is the check that proves C1 actually solved the class and not just today's numbers.
+
+**AC18 (new)** *No snapshot gates the exit.* Change a snapshot's committed value in a throwaway
+contract copy to a deliberately wrong number. The harness reports the difference and still exits **0**.
+Change a floor so it is breached, and it exits non-zero. This proves the two categories are wired
+differently rather than merely labelled differently.
+
+### Mutation proof, added
+
+- **convert the anchor invariant back to `count(JOB_COSTS) = 62110`** → passes today only by accident of
+  timing and must fail against fixture A with a row added (AC17). This is the regression guard on C1
+  itself.
+
+## Handoff
+
+Round 2 commits on top of round 1; do not rewrite round 1's commits. `RESULT-2.md` must record the
+reclassification per assertion per contract — which kind each became and why — plus AC17 and AC18
+evidence, and the committed-vs-observed snapshot tables. `REVIEW-task-1.md` and the untracked `Revenue`
+file stay untracked.

@@ -94,32 +94,76 @@ FROM (
 -- with-data count over every raw column, in the same run), both driven by the
 -- directives above.
 
--- Per-column non-null floors, measured individually -- never templated. Committed
--- 2026-09-25. "Job #" (the anchor) is 219 of 219; "End Date" is 145 of 219 -- nothing
--- alike, which is why a floor copied from one column to the other would be wrong.
--- @assert jobnum_nn: (SELECT count("Job #") FROM contract_view) = 219
--- @assert matchproject_nn: (SELECT count("match project") FROM contract_view) = 214
--- @assert revtotal_nn: (SELECT count("Revenue Total") FROM contract_view) = 201
--- @assert earntotal_nn: (SELECT count("Earnings Total") FROM contract_view) = 201
--- @assert startdate_nn: (SELECT count("Start Date") FROM contract_view) = 150
--- @assert enddate_nn: (SELECT count("End Date") FROM contract_view) = 145
-
--- Start Date type and range. any_value() is required for the same reason as the GL
--- contract's glperiod_is_date: an un-aggregated typeof() returns one row per record.
+-- Round 2, C1 -- every assertion below is reclassified into exactly one of three kinds
+-- (TASK.md CORRECTIONS section), the same pass applied to the GL contract. This sheet
+-- showed zero drift between the two measurement sessions, so nothing here failed in
+-- round 1 -- but the six hard-equality counts below (jobnum_nn, matchproject_nn,
+-- revtotal_nn, earntotal_nn, startdate_nn, enddate_nn), the two hard sums, the hard
+-- date range, and the hard distinct-year count carry exactly the same latent defect
+-- the GL contract's four broken asserts had: none of them can survive the sheet's own
+-- ordinary movement (227 -> 226 -> 219 rows, and new sales years arriving on a
+-- calendar this workbook has no control over).
+--
+--   INVARIANT (a relationship, never a literal -- refresh-proof):
+--     - anchor completeness, count("Job #") = count(*): computed by the "@anchor"
+--       directive above and reported as the ANCHOR,... line. REPLACES jobnum_nn.
+--     - startdate_is_date (below, unchanged): "Start Date" decodes to a real DATE.
+--     - the consistency equality (view rows = with-data rows over all sheet columns):
+--       already computed by the harness for every contract, unchanged by this round.
+--     - revtotal_sum_exact_decimal, earntotal_sum_exact_decimal, and
+--       revtotal_maxcast_exact_decimal (below, new): each sum/max has no
+--       floating-point tail, a property of the DECIMAL(18,2) casts above and not of
+--       the row count.
+--
+--   FLOOR (a measured ratio with justified headroom -- gates the exit code):
+--     - matchproject_ratio_floor (below, new) replaces matchproject_nn: >= 0.90 --
+--       observed 0.9772 (214 of 219).
+--     - revtotal_ratio_floor (below, new) replaces revtotal_nn: >= 0.85 -- observed
+--       0.9178 (201 of 219).
+--     - enddate_ratio_floor (below, new) replaces enddate_nn: >= 0.55 -- observed
+--       0.6621 (145 of 219).
+--     - the existing @rows_floor: 200 directive above, unchanged.
+--
+--   SNAPSHOT (reported, never gates the exit code): earntotal_nn and startdate_nn have
+--   no measured floor headroom given for this round (the CORRECTIONS section's floor
+--   table names only rows/Job #/Revenue Total/End Date/match project for this
+--   contract), so both stay absolute counts -- reported, not asserted. Also
+--   snapshotted: matchproject_nn, revtotal_nn, enddate_nn (the same counts the three
+--   floors above are ratios of -- Phil sees both forms), both money sums, the cast
+--   max, the "Start Date" min/max, and the distinct "Sales Year" count -- all of these
+--   are absolute figures that can legitimately move (a new year arrives, more sales
+--   close) and none of them has a defensible floor value handed down for this round.
 -- @assert startdate_is_date: (SELECT any_value(typeof("Start Date")) FROM contract_view) = 'DATE'
--- @assert startdate_range: (SELECT min("Start Date") = DATE '2023-07-15' AND max("Start Date") = DATE '2027-03-15' FROM contract_view)
+-- @assert matchproject_ratio_floor: (SELECT count("match project")::DOUBLE / count(*) FROM contract_view) >= 0.90
+-- @assert revtotal_ratio_floor: (SELECT count("Revenue Total")::DOUBLE / count(*) FROM contract_view) >= 0.85
+-- @assert enddate_ratio_floor: (SELECT count("End Date")::DOUBLE / count(*) FROM contract_view) >= 0.55
+-- @assert revtotal_sum_exact_decimal: (SELECT typeof(sum("Revenue Total")) FROM contract_view) LIKE 'DECIMAL%'
+-- @assert earntotal_sum_exact_decimal: (SELECT typeof(sum("Earnings Total")) FROM contract_view) LIKE 'DECIMAL%'
+-- @assert revtotal_maxcast_exact_decimal: (SELECT typeof(max("Revenue Total")) FROM contract_view) LIKE 'DECIMAL%'
 
--- Money sums, cast first -- committed 2026-09-25.
--- @assert revtotal_sum: (SELECT sum("Revenue Total") FROM contract_view) = 36580445574.84
--- @assert earntotal_sum: (SELECT sum("Earnings Total") FROM contract_view) = 1439728975.91
-
--- Distinct year count, committed 2026-09-25.
--- @assert salesyear_distinct: (SELECT count(DISTINCT "Sales Year") FROM contract_view) = 4
-
--- Cast-before-compare guard (PLAN-4 §5's "casts applied before any range comparison",
--- discharged here for the first time on this contract -- see TASK.md AC11). If
--- "Revenue Total" were left VARCHAR, max() would return the lexicographic maximum
--- '99266455' instead of the true 1,682,000,000.00 -- a 17x error. Because this
--- assertion evaluates against contract_view, where the cast is already applied, it
--- fails loudly (wrong value or a comparison type error) if that cast is ever removed.
--- @assert revtotal_maxcast: (SELECT max("Revenue Total") FROM contract_view) = 1682000000.00
+-- Snapshots (round 2, C2): reported unconditionally, gate nothing. Committed values
+-- below are this session's own baseline (2026-09-25) -- zero drift observed against
+-- the 2026-09-24 figures this contract originally shipped with. A mismatch on a
+-- future run is drift to observe via SNAPSHOT_DRIFT, not a failure.
+-- @snapshot matchproject_nn: (SELECT count("match project") FROM contract_view)
+-- @snapshot_committed matchproject_nn: 214
+-- @snapshot revtotal_nn: (SELECT count("Revenue Total") FROM contract_view)
+-- @snapshot_committed revtotal_nn: 201
+-- @snapshot earntotal_nn: (SELECT count("Earnings Total") FROM contract_view)
+-- @snapshot_committed earntotal_nn: 201
+-- @snapshot startdate_nn: (SELECT count("Start Date") FROM contract_view)
+-- @snapshot_committed startdate_nn: 150
+-- @snapshot enddate_nn: (SELECT count("End Date") FROM contract_view)
+-- @snapshot_committed enddate_nn: 145
+-- @snapshot revtotal_sum: (SELECT sum("Revenue Total") FROM contract_view)
+-- @snapshot_committed revtotal_sum: 36580445574.84
+-- @snapshot earntotal_sum: (SELECT sum("Earnings Total") FROM contract_view)
+-- @snapshot_committed earntotal_sum: 1439728975.91
+-- @snapshot revtotal_max: (SELECT max("Revenue Total") FROM contract_view)
+-- @snapshot_committed revtotal_max: 1682000000.00
+-- @snapshot startdate_min: (SELECT min("Start Date") FROM contract_view)
+-- @snapshot_committed startdate_min: 2023-07-15
+-- @snapshot startdate_max: (SELECT max("Start Date") FROM contract_view)
+-- @snapshot_committed startdate_max: 2027-03-15
+-- @snapshot salesyear_distinct: (SELECT count(DISTINCT "Sales Year") FROM contract_view)
+-- @snapshot_committed salesyear_distinct: 4

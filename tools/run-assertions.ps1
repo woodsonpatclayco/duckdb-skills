@@ -62,13 +62,36 @@ verbatim from check-contract.ps1); TRUNCATION_DEFAULT_ROWS / TRUNCATION_WITHDATA
 TRUNCATION_ROWS_LOST; CONSISTENCY_VIEW_ROWS; ANCHOR,<name>,<nonnull>,<PASS|FAIL>;
 ROWS_FLOOR,<floor>,<observed>,<PASS|FAIL>; FINGERPRINT,MATCH or FINGERPRINT,DRIFT
 followed by FINGERPRINT_COMMITTED,<list> and FINGERPRINT_OBSERVED,<list> (drift is
-reported, never a failure -- items 3+4's policy, retained); a directive or grammar
-problem for a contract is ERROR,<contract>,<message> and that contract's heavy checks
-are skipped entirely (guards run before any 68 MB read); and a final
-SUMMARY,contracts=<n>,assertions=<n>,failures=<n> line. `failures` counts every
-individual failing signal across the whole run (each non-PASS assertion, each ERROR,
-each truncation/consistency/anchor/floor problem) -- not just failing contracts.
+reported, never a failure -- items 3+4's policy, retained); SNAPSHOT,<name>,<value>
+per `-- @snapshot` (round 2, C1/C2 below) followed by SNAPSHOT_DRIFT,<name>,
+committed=<c>,observed=<o> only when the two disagree (also never a failure -- see
+below); a directive or grammar problem for a contract is ERROR,<contract>,<message>
+and that contract's heavy checks are skipped entirely (guards run before any 68 MB
+read); and a final SUMMARY,contracts=<n>,assertions=<n>,failures=<n> line. `failures`
+counts every individual failing signal across the whole run (each non-PASS assertion,
+each ERROR, each truncation/consistency/anchor/floor problem) -- not just failing
+contracts. SNAPSHOT and SNAPSHOT_DRIFT lines are never counted, by design (see below).
 Exit code is non-zero iff failures > 0.
+
+Round 2, C1/C2 -- a fifth and sixth additive directive family, `-- @snapshot` and
+`-- @snapshot_committed`, named and paired (unlike @sheet/@anchor/@rows_floor/
+@fingerprint, which are each required exactly once; @snapshot may appear zero or more
+times, but every `-- @snapshot <name>: <expr>` must have exactly one matching
+`-- @snapshot_committed <name>: <literal>`, and vice versa -- a name present in one
+family but not the other is an ERROR, same "never silently skipped" discipline as
+every other directive here). This exists because item 4's original @assert grammar
+gives exactly one behaviour on a mismatch: FAIL, which gates the exit code. TASK.md's
+round-2 corrections classify some values (absolute row/non-null counts, money sums) as
+things that are EXPECTED to move as the live sheet refreshes, and must be reported, not
+gated -- the same value, a genuinely different wiring. `-- @snapshot <name>: <expr>`
+supplies a self-contained scalar subquery (identical shape to an @assert expression,
+e.g. `(SELECT count(JOB_COSTS) FROM contract_view)`) evaluated once per contract in the
+same phase-2 DuckDB batch as ANCHOR/FINGERPRINT (no extra 68 MB read);
+`-- @snapshot_committed <name>: <literal>` supplies the value it was pinned at. Every
+run prints `SNAPSHOT,<name>,<observed>` unconditionally, and prints
+`SNAPSHOT_DRIFT,<name>,committed=<c>,observed=<o>` ONLY when the two differ -- but
+never, under any circumstance, increments $totalFailures. AC18 exists specifically to
+prove that last sentence with a mutation, not just a description of intent.
 #>
 param(
     [string]$Contract
@@ -138,6 +161,39 @@ function Get-DirectiveOccurrences {
     [pscustomobject]@{ Values = $values; Malformed = $malformed }
 }
 
+# --- helper: parse a NAMED, repeatable directive family (@snapshot / @snapshot_committed,
+# round 2 C1/C2). Unlike Get-DirectiveOccurrences above (exactly one per file), each of
+# these carries its own <name> and may appear zero or more times -- pairing across the two
+# families is validated by the caller. "\b" after the keyword is what keeps "@snapshot"
+# from ever matching a "@snapshot_committed" line: both sides of the "t|_" join are word
+# characters, so no boundary exists there and the line pattern below simply does not match. --
+function Get-NamedDirectiveOccurrences {
+    param([string[]]$Lines, [string]$Keyword)
+    $linePattern = "^\s*--\s*@$Keyword\b"
+    $fullPattern = "^\s*--\s*@$Keyword\s+([A-Za-z0-9_]+)\s*:(.*)$"
+    $byName = @{}
+    $malformed = New-Object System.Collections.Generic.List[string]
+    $duplicates = New-Object System.Collections.Generic.List[string]
+    $ln = 0
+    foreach ($line in $Lines) {
+        $ln++
+        if ($line -notmatch $linePattern) { continue }
+        $m = [regex]::Match($line, $fullPattern)
+        if (-not $m.Success) {
+            $malformed.Add("line ${ln}: '@$Keyword' directive does not match grammar (missing name or ':'): $line")
+            continue
+        }
+        $name = $m.Groups[1].Value
+        $expr = $m.Groups[2].Value.Trim()
+        if ($byName.ContainsKey($name)) {
+            $duplicates.Add("line ${ln}: duplicate '@$Keyword' directive name '$name'")
+            continue
+        }
+        $byName[$name] = $expr
+    }
+    [pscustomobject]@{ ByName = $byName; Malformed = $malformed; Duplicates = $duplicates }
+}
+
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $totalAssertions = 0
 $totalFailures = 0
@@ -171,6 +227,29 @@ foreach ($cf in $contractFiles) {
     $rowsFloorInt = 0
     if ($dirValues.ContainsKey('rows_floor') -and -not [int]::TryParse($dirValues['rows_floor'], [ref]$rowsFloorInt)) {
         $dirErrors.Add("'@rows_floor' value is not an integer: $($dirValues['rows_floor'])")
+    }
+
+    # --- @snapshot / @snapshot_committed (round 2, C1/C2): zero or more, paired by name.
+    # Guards run in this same before-any-heavy-read block, same discipline as the four
+    # directives above -- a name present in one family but not the other is an error, never
+    # silently skipped. ---------------------------------------------------------------------
+    $snapshotRes = Get-NamedDirectiveOccurrences -Lines $lines -Keyword 'snapshot'
+    foreach ($e in $snapshotRes.Malformed) { $dirErrors.Add($e) }
+    foreach ($e in $snapshotRes.Duplicates) { $dirErrors.Add($e) }
+
+    $snapshotCommittedRes = Get-NamedDirectiveOccurrences -Lines $lines -Keyword 'snapshot_committed'
+    foreach ($e in $snapshotCommittedRes.Malformed) { $dirErrors.Add($e) }
+    foreach ($e in $snapshotCommittedRes.Duplicates) { $dirErrors.Add($e) }
+
+    foreach ($n in $snapshotRes.ByName.Keys) {
+        if (-not $snapshotCommittedRes.ByName.ContainsKey($n)) {
+            $dirErrors.Add("'@snapshot $n' has no matching '@snapshot_committed $n' directive")
+        }
+    }
+    foreach ($n in $snapshotCommittedRes.ByName.Keys) {
+        if (-not $snapshotRes.ByName.ContainsKey($n)) {
+            $dirErrors.Add("'@snapshot_committed $n' has no matching '@snapshot $n' directive")
+        }
     }
 
     if ($dirErrors.Count -gt 0) {
@@ -325,6 +404,12 @@ foreach ($cf in $contractFiles) {
         [void]$body.Append("SELECT 'ANCHOR_TOTAL', count(*) FROM contract_view;`r`n")
         [void]$body.Append("SELECT 'ANCHOR_NONNULL', $anchorSql FROM contract_view;`r`n")
         [void]$body.Append("SELECT 'FINGERPRINT_OBSERVED', string_agg(column_name, '|' ORDER BY column_index) FROM duckdb_columns() WHERE table_name = 'contract_view';`r`n")
+        # Round 2 C1/C2: one SELECT per @snapshot, same self-contained-scalar-subquery
+        # shape as an @assert expression -- evaluated in this same batch so a snapshot
+        # never costs an extra 68 MB read.
+        foreach ($sn in $snapshotRes.ByName.Keys) {
+            [void]$body.Append("SELECT '${sn}_SNAPSHOT', $($snapshotRes.ByName[$sn]);`r`n")
+        }
 
         $bodyFile = Join-Path $scratchDir 'phase2.sql'
         [System.IO.File]::WriteAllText($bodyFile, $body.ToString(), $utf8NoBom)
@@ -390,6 +475,36 @@ foreach ($cf in $contractFiles) {
             Write-Output 'FINGERPRINT,DRIFT'
             Write-Output "FINGERPRINT_COMMITTED,$committedFingerprint"
             Write-Output "FINGERPRINT_OBSERVED,$observedFingerprint"
+        }
+
+        # Round 2 C1/C2: report every @snapshot, unconditionally, as a plain
+        # check_id,value context line. Report SNAPSHOT_DRIFT only when the observed
+        # value disagrees with the committed one -- but this NEVER touches
+        # $totalFailures, under any circumstance. That is the entire point of the
+        # category (AC18): a snapshot is visible, a floor/invariant is enforced.
+        foreach ($sn in $snapshotRes.ByName.Keys) {
+            $snapKey = "${sn}_SNAPSHOT"
+            if (-not $values.ContainsKey($snapKey)) {
+                Write-Output "ERROR,$baseName,expected snapshot value '$snapKey' missing from phase 2 output"
+                $totalFailures++
+                continue
+            }
+            $observedSnap = $values[$snapKey]
+            $committedSnap = $snapshotCommittedRes.ByName[$sn]
+            Write-Output "SNAPSHOT,$sn,$observedSnap"
+
+            $snapMatches = $false
+            $coDec = 0.0; $obDec = 0.0
+            if ([double]::TryParse($committedSnap, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$coDec) -and
+                [double]::TryParse($observedSnap, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$obDec)) {
+                $snapMatches = ($coDec -eq $obDec)
+            } else {
+                $snapMatches = ($committedSnap.Trim() -eq $observedSnap.Trim())
+            }
+            if (-not $snapMatches) {
+                Write-Output "SNAPSHOT_DRIFT,$sn,committed=$committedSnap,observed=$observedSnap"
+            }
+            # No failure increment, deliberately, on either branch above.
         }
     } finally {
         Remove-Item -LiteralPath $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
