@@ -126,15 +126,20 @@ FROM (
 --   pairs below. Phil ties SUM(JOB_COSTS) to a report; its value must stay visible
 --   even though the assertion protecting it is now about the cast, not the number.
 --
--- One assertion is deleted outright rather than reclassified: glperiod_range (the
--- hard `min = 2026-07-01 AND max = 2026-10-01` equality). It adds nothing beyond what
--- two stronger, already-committed checks already prove: glperiod_is_date (below) that
--- the column decodes to a real DATE, and checks/gl-facts.sql's AC8 that xl_date's
--- decoding agrees with DuckDB's own independent decoder row-for-row (not just on
--- aggregates). A literal min/max window is exactly the kind of absolute figure this
--- round exists to stop gating on, and unlike the four counts above it has no ratio
--- form -- so it is dropped rather than turned into a floor that would have to be
--- re-guessed with no justification.
+-- glperiod_range (the hard `min = 2026-07-01 AND max = 2026-10-01` equality) is
+-- RECLASSIFIED AS A SNAPSHOT, not deleted. Round 2 originally dropped it outright,
+-- arguing it was redundant with glperiod_is_date plus checks/gl-facts.sql's AC8
+-- row-for-row decoder agreement. Verification rejected that reasoning: two decoders
+-- agreeing proves the decode is CONSISTENT, not that the range is SANE -- a corrupted
+-- GL_PERIOD window would pass both remaining checks unnoticed. The deletion also left
+-- this contract inconsistent with its sister, which keeps the identically-shaped
+-- startdate_min / startdate_max as snapshots (All_Sales_Data.sql:164-167).
+--
+-- It cannot be a floor (a date window has no ratio form and any threshold would be
+-- re-guessed with no justification) and it must not be a gate (a GL period window moves
+-- as months roll, which is precisely what this round exists to stop gating on). Snapshot
+-- is the correct category: the value stays visible and drift is reported, but it never
+-- gates the exit code.
 -- @assert jobcosts_sum_exact_decimal: (SELECT typeof(sum(JOB_COSTS)) FROM contract_view) LIKE 'DECIMAL%'
 -- @assert vendorname_ratio_floor: (SELECT count(VENDOR_NAME)::DOUBLE / count(*) FROM contract_view) >= 0.80
 -- @assert glperiod_ratio_floor: (SELECT count(GL_PERIOD)::DOUBLE / count(*) FROM contract_view) >= 0.25
@@ -157,3 +162,7 @@ FROM (
 -- @snapshot_committed glperiod_nn: 18884
 -- @snapshot jobcosts_sum: (SELECT sum(JOB_COSTS) FROM contract_view)
 -- @snapshot_committed jobcosts_sum: 22478661033.93
+-- @snapshot glperiod_min: (SELECT min(GL_PERIOD) FROM contract_view)
+-- @snapshot_committed glperiod_min: 2026-07-01
+-- @snapshot glperiod_max: (SELECT max(GL_PERIOD) FROM contract_view)
+-- @snapshot_committed glperiod_max: 2026-10-01
