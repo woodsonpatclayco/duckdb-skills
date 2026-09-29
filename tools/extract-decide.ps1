@@ -21,6 +21,19 @@ SIDECAR.md requires null (no metadata row count available) never to read as 0
 count was available for that object; anything else must parse as [long] or the
 call is a usage error, exit 2.
 
+For more than one source object, PowerShell 5.1 cannot bind more than one
+value to an array parameter through `powershell -File` -- `-CurrentRows
+100,200` arrives as a single element "100,200", not two elements. Both
+-CurrentRows and -CurrentLastAltered therefore accept a single comma-joined
+element and split it (each part trimmed) before validation, alongside the
+existing multi-value array form (`-CurrentRows @('100','200')`), which still
+works unchanged. Safe for -CurrentRows because its elements are an integer or
+the literal "null", neither of which can contain a comma; safe for
+-CurrentLastAltered because its elements are parsed by
+[DateTimeOffset]::TryParse under InvariantCulture, which does not accept a
+comma as the fractional-second separator ISO 8601 otherwise permits. An empty
+element (e.g. "100,") is a usage error, exit 2 -- never silently a null.
+
 Verdicts (exactly one printed, exit 0 for every one of them):
   FRESH
   STALE (probe required) age=<n> window=<w> objects=<comma-separated>
@@ -28,24 +41,35 @@ Verdicts (exactly one printed, exit 0 for every one of them):
   SKIPPED (source unchanged)
   SKIPPED (ambiguous: last_altered moved, rows unchanged) age=<n>
   REFRESH (ambiguous past ceiling)
+  SKIPPED (no evidence) age=<n>
+  REFRESH (no evidence past ceiling)
   REFRESH (clock skew) age=<n>
   REFRESH (forced)
   REFRESH (no sidecar)
   REFRESH (unreadable sidecar)
   REFRESH (malformed sidecar: <reason>)
 
+"SKIPPED (no evidence)"/"REFRESH (no evidence past ceiling)" fire only when
+BOTH stages abstain -- nothing comparable at all, on either rows or
+last_altered, for any source object. That is not the same as "unchanged": it
+means the tool has no information, and per SIDECAR.md it must never read as a
+known value. Bounded by DSK_MAX_AGE_MINUTES exactly as the ambiguous branch
+is. "SKIPPED (source unchanged)" keeps its prior meaning -- at least one stage
+saw real evidence of no change -- and stays unbounded.
+
 Exit 2 is reserved for parameter/usage errors only (a -CurrentRows element that
-is neither "null" nor parseable as an integer, or an array whose length does
-not match source_objects). Exit 0 covers every verdict above, including an
-absent extract directory -- unlike extract-status.ps1, which *reports state*
-and exits 2 for a missing -Name, this script *decides an action*, and "not
-there yet" has a perfectly good action (REFRESH (no sidecar)).
+is neither "null" nor parseable as an integer, an empty element after
+comma-splitting, or an array whose length does not match source_objects).
+Exit 0 covers every verdict above, including an absent extract directory --
+unlike extract-status.ps1, which *reports state* and exits 2 for a missing
+-Name, this script *decides an action*, and "not there yet" has a perfectly
+good action (REFRESH (no sidecar)).
 
 DSK_FORCE must be exactly the string "1" to force a refresh; any other value,
 "0" included, is not forced. DSK_WINDOW_MINUTES (unset means 60) is the
 freshness window; DSK_MAX_AGE_MINUTES (unset means 1440) bounds the ambiguous
-branch only -- an unchanged last_altered is never bounded, since it means
-genuinely unaltered.
+and no-evidence branches only -- an unchanged last_altered is never bounded,
+since it means genuinely unaltered.
 #>
 param(
     [string]$Name,
@@ -77,6 +101,22 @@ function Get-EffectiveCeilingMinutes {
 function ConvertFrom-DuckValue($value) {
     if ($null -eq $value -or $value -eq 'NULL' -or $value -eq '') { return $null }
     return $value
+}
+
+# Splits every element on commas and trims each part, so a single
+# comma-joined element from `powershell -File` ("100,200") and the existing
+# multi-value array form (@('100','200')) both flatten to the same list.
+# Written with Write-Output rather than `return $array` and collected with
+# @() at every call site, so a one-part or two-part result is never silently
+# unrolled to a scalar by pipeline enumeration -- the same mechanism behind
+# D2, guarded against here rather than reintroduced.
+function Split-CommaJoined {
+    param([string[]]$Values)
+    foreach ($v in $Values) {
+        foreach ($part in $v.Split(',')) {
+            Write-Output $part.Trim()
+        }
+    }
 }
 
 # Parses a UTC ISO-8601-ish timestamp string to the second. Returns $null if it
@@ -211,6 +251,8 @@ if (-not $PSBoundParameters.ContainsKey('CurrentRows')) {
     exit 0
 }
 
+$CurrentRows = @(Split-CommaJoined $CurrentRows)
+
 if ($CurrentRows.Count -ne $sourceObjectsList.Count) {
     Write-Output "expected $($sourceObjectsList.Count) values for $($sourceObjectsList.Count) source objects, got $($CurrentRows.Count)"
     exit 2
@@ -224,6 +266,9 @@ foreach ($v in $CurrentRows) {
     }
 }
 
+if ($PSBoundParameters.ContainsKey('CurrentLastAltered')) {
+    $CurrentLastAltered = @(Split-CommaJoined $CurrentLastAltered)
+}
 if ($PSBoundParameters.ContainsKey('CurrentLastAltered') -and $CurrentLastAltered.Count -ne $sourceObjectsList.Count) {
     Write-Output "expected $($sourceObjectsList.Count) values for $($sourceObjectsList.Count) source objects, got $($CurrentLastAltered.Count)"
     exit 2
@@ -244,8 +289,14 @@ if ($stage1 -eq 'moved') {
     exit 0
 }
 
-# Stage 1 said "unchanged" or "abstain" -- stage 2 decides either way.
-$currentLastAltered = if ($PSBoundParameters.ContainsKey('CurrentLastAltered')) { $CurrentLastAltered } else { [object[]]::new($sourceObjectsList.Count) }
+# Stage 1 said "unchanged" or "abstain" -- stage 2 decides either way. The
+# @(...) wrap forces array semantics on the if-statement's own output: without
+# it, a single-element array in either branch (the placeholder at exactly one
+# source object, or a one-object $CurrentLastAltered) is unrolled to its lone
+# element by pipeline enumeration -- $null in the placeholder's case -- and
+# Test-LastAlteredStage's $Current[$i] indexes into that null. This is D2; see
+# the header for why retyping the placeholder does not fix it.
+$currentLastAltered = @(if ($PSBoundParameters.ContainsKey('CurrentLastAltered')) { $CurrentLastAltered } else { [object[]]::new($sourceObjectsList.Count) })
 $stage2 = Test-LastAlteredStage -Baseline $baselineLastAltered -Current $currentLastAltered
 
 if ($stage2 -eq 'moved') {
@@ -253,6 +304,20 @@ if ($stage2 -eq 'moved') {
         Write-Output 'REFRESH (ambiguous past ceiling)'
     } else {
         Write-Output "SKIPPED (ambiguous: last_altered moved, rows unchanged) age=$ageInt"
+    }
+    exit 0
+}
+
+# D1: both stages abstained -- nothing comparable on rows or last_altered for
+# any source object. Reached only with stage1 in {unchanged, abstain} (moved
+# already returned above) and stage2 in {unchanged, abstain} (moved already
+# returned above), so this is exactly the (abstain, abstain) case and cannot
+# shadow the ambiguous branch or the real-evidence "unchanged" case below.
+if ($stage1 -eq 'abstain' -and $stage2 -eq 'abstain') {
+    if ($age -gt $ceiling) {
+        Write-Output 'REFRESH (no evidence past ceiling)'
+    } else {
+        Write-Output "SKIPPED (no evidence) age=$ageInt"
     }
     exit 0
 }
