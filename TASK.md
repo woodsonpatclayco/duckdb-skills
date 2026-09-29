@@ -9,9 +9,9 @@ the lake, not from a raw read that currently returns the wrong thing.
 PLAN-4 §7 (lines 615-629). The last item on the workbook track; item 8 (the cross-source join) follows.
 
 Four parts. **A** and **B** are new proof tools Phil can re-run. **C** is skill text. **D** is a bug in
-`tools\materialize.ps1` found while measuring A. **D is not in PLAN-4 §7 and is Phil's decision** — it
-changes shipped item-6 behaviour. If he cuts it, remove part D, AC3, AC4, mutations 5a/5b, and the
-`errored=` text; nothing else depends on it.
+`tools\materialize.ps1` found while measuring A. **D is not in PLAN-4 §7; Phil decided on 2026-09-29 to
+keep it in item 7**, knowing it changes shipped item-6 behaviour (a missing or unreadable workbook no
+longer aborts the remaining contracts, and `SUMMARY` gains `errored=`).
 
 ## Measured facts this spec rests on — all taken 2026-09-29 on this machine
 
@@ -310,7 +310,7 @@ workbook present (cite `tools\prove-requery.ps1`). The description is not touche
 
 ## D — `tools\materialize.ps1`: a missing workbook must not abort the other contracts
 
-**Phil's decision whether this is in item 7** (see top). Found while measuring A. Today, when a contract's
+**In scope by Phil's decision** (see top). Found while measuring A. Today, when a contract's
 workbook does not exist:
 
 - the `read_blob` hash read fails first, so the explicit `Test-Path` branch at `materialize.ps1:287-290`
