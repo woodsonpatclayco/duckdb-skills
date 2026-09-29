@@ -13,6 +13,28 @@ You are helping the user read and analyze a data file using DuckDB.
 Filename given: `$0`
 Question: `${1:-describe the data}`
 
+## Excel workbooks
+
+**If a contract covers the workbook and sheet, answer from the lake, not the
+workbook.** Contracts are `contracts\*.sql`; each names its workbook in
+`read_xlsx('<path>', sheet='<sheet>', …)`. Query `lake.<contract>` per the
+`lakehouse` skill, and check freshness with `tools\lake-status.ps1`.
+
+**If none does:** list sheets with `tools\list-sheets.ps1 <absolute path>` (the
+first sheet may be metadata — `Data Extracts.xlsm`'s is a 2-row `MetaData`);
+read the named sheet with `sheet=`, `all_varchar = true` and
+`stop_at_empty = false`; cast money explicitly to `DECIMAL` before summing; and
+**tell Phil the types are unverified.** Never `ignore_errors = true`.
+
+**Why:** an inferred read sums GL `JOB_COSTS` as DOUBLE (`22498718519.95991`)
+where the contract returns `22498718519.96`, and which columns infer correctly
+changes as the sheet's contents change.
+
+A contract is added only when Phil asks — this section is guidance, not an
+instruction to write one.
+
+This is guidance a session is asked to follow, not a check anything enforces.
+
 ## Step 1 — Read it
 
 `RESOLVED_PATH` is `$0`. If the user gave a bare filename (no `/`), resolve it to a full path with `find` first.
@@ -55,7 +77,7 @@ CREATE OR REPLACE MACRO read_any(file_name) AS TABLE
       WHEN file_name ILIKE '%.csv' OR file_name ILIKE '%.tsv' OR file_name ILIKE '%.tab' OR file_name ILIKE '%.txt' THEN 'csv_case'
       WHEN file_name ILIKE '%.parquet' OR file_name ILIKE '%.pq' THEN 'parquet_case'
       WHEN file_name ILIKE '%.avro' THEN 'avro_case'
-      WHEN file_name ILIKE '%.xlsx' OR file_name ILIKE '%.xls' THEN 'excel_case'
+      WHEN file_name ILIKE '%.xlsx' OR file_name ILIKE '%.xls' OR file_name ILIKE '%.xlsm' THEN 'excel_case'
       WHEN file_name ILIKE '%.shp' OR file_name ILIKE '%.gpkg' OR file_name ILIKE '%.fgb' OR file_name ILIKE '%.kml' THEN 'spatial_case'
       WHEN file_name ILIKE '%.ipynb' THEN 'ipynb_case'
       WHEN file_name ILIKE '%.db' OR file_name ILIKE '%.sqlite' OR file_name ILIKE '%.sqlite3' THEN 'sqlite_case'

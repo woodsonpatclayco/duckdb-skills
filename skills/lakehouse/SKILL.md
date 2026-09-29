@@ -24,6 +24,9 @@ override with `-LakeRoot` on either tool. For a **read-only** query, add
 accepts it, and it is what `tools\lake-status.ps1` uses so a status check never
 creates a lake that does not yet exist. `lake.<contract_name>` holds the current
 data; `lake.manifest` and `lake.check_history` hold provenance and check results.
+Once a contract is materialized, the lake is the place to answer questions about
+that sheet, and it does not need the workbook present — see
+`tools\prove-requery.ps1`.
 
 ## The four-way freshness key -- and why the compat hash is in it
 
