@@ -92,12 +92,23 @@ Call `tools\extract-decide.ps1 -Name <name>` with **no current values**.
 - `STALE (probe required) age=<n> window=<w> objects=<list>` -- probe each printed
   object in order (`SHOW TABLES` rows + `LAST_ALTERED`), then call
   `tools\extract-decide.ps1` again with `-CurrentRows`/`-CurrentLastAltered`
-  positional against that same object list.
-- Any `REFRESH (...)` -- re-materialize **silently, no prompt**. Print the sidecar's
-  `row_count` and `runtime_seconds` *before* refreshing (the wait is otherwise
-  unpredictable), and one line of elapsed time after. The first-ever materialize
-  has no prior runtime to print.
-- `SKIPPED (...)` -- serve the existing extract as current.
+  positional against that same object list. For more than one object,
+  `powershell -File` cannot bind separate values to an array parameter, so pass
+  a single comma-joined string per parameter instead of two bare tokens. Worked
+  example, two objects probed as `objects=DB.SCH.A,DB.SCH.B` with rows 100 and
+  205: `tools\extract-decide.ps1 -Name <name> -CurrentRows 100,205
+  -CurrentLastAltered "<a-timestamp>,<b-timestamp>"` -- each value lands
+  positionally against the object printed in that same order.
+- Any `REFRESH (...)`, including `REFRESH (no evidence past ceiling)` --
+  re-materialize **silently, no prompt**. Print the sidecar's `row_count` and
+  `runtime_seconds` *before* refreshing (the wait is otherwise unpredictable),
+  and one line of elapsed time after. The first-ever materialize has no prior
+  runtime to print.
+- `SKIPPED (...)` -- serve the existing extract as current. `SKIPPED (no
+  evidence) age=<n>` means the probe returned no comparable row count or
+  last_altered for **any** object -- it is not a claim that the source is
+  unchanged, only that nothing was available to compare. The other `SKIPPED`
+  variants reflect real evidence of no change.
 
 **A failed re-pull must not serve stale data as current.** Print the literal
 `STALE: refresh failed, serving nothing; extract age <n> minutes` and stop.

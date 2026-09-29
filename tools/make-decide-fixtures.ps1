@@ -22,6 +22,15 @@ never Set-Content -Encoding UTF8.
 Every row's baseline source_rows is 100 (except the null-baseline and absent
 rows), and every fixture has exactly one source object, DB.SCH.A, so a single
 -CurrentRows/-CurrentLastAltered value is always positional against it.
+
+Two additional two-object fixtures (item 2c) cover the multi-object debt:
+`two_object` (source_rows [100,200], source_bytes [2048,2048],
+source_last_altered both baselined the same) exercises the nine-row matrix
+from TASK.md's "Measured facts", including the [null,null] -> no-evidence
+case. `two_object_w6` (source_rows [100,null]) exercises the tenth,
+per-object-aggregation case. Both carry all three source_* arrays at
+length 2 -- registry.sql rejects a shorter one as "parallel array mismatch"
+before extract-decide.ps1 ever sees stage 1.
 #>
 param(
     [string]$Root = '.duckdb-skills\fixtures\decide'
@@ -181,5 +190,69 @@ New-DecideExtract -Name 'm_null_current' -Fields $f
 $f = New-DecideFields -MaterializedAt $now.AddMinutes(-90) -RowsBaseline 100 -LastAlteredBaseline $lastAlteredSame
 $f['name'] = 'not_the_directory_name'
 New-DecideExtract -Name 'n_malformed' -Fields $f
+
+# --- two-object fixtures (item 2c) ------------------------------------------
+#
+# Same shared helpers as above (New-DecideExtract, Format-Utc, Write-Utf8NoBom),
+# but the fields are built by hand rather than through New-DecideFields, since
+# that function hardcodes single-element arrays for source_bytes and
+# source_last_altered -- copying it would produce a malformed (length-1)
+# sidecar for a two-object fixture and fail the length check before stage 1.
+# $RowsBaseline is [object[]] so a $null element (two_object_w6's second
+# object) survives ConvertTo-Json as a JSON null, never a coerced 0.
+function New-DecideFieldsMulti {
+    param(
+        [string[]]$SourceObjects,
+        [DateTime]$MaterializedAt,
+        [object[]]$RowsBaseline,
+        [int[]]$SourceBytesBaseline,
+        [DateTime[]]$LastAlteredBaseline
+    )
+    return [ordered]@{
+        sidecar_version     = 1
+        name                = '__placeholder__'
+        query               = 'SELECT * FROM DB.SCH.A JOIN DB.SCH.B'
+        source_objects      = @($SourceObjects)
+        materialized_at     = (Format-Utc $MaterializedAt)
+        window_minutes      = 60
+        expires_at          = (Format-Utc $MaterializedAt.AddMinutes(60))
+        row_count           = 100
+        output_bytes        = 4096
+        connection          = 'DATAHUB'
+        role                = 'ANALYST'
+        database            = 'DB'
+        warehouse           = 'WH_ANALYST'
+        source_rows         = @($RowsBaseline)
+        source_bytes        = @($SourceBytesBaseline)
+        source_last_altered = @($LastAlteredBaseline | ForEach-Object { Format-Utc $_ })
+        runtime_seconds     = 0.6
+    }
+}
+
+$twoObjects = @('DB.SCH.A', 'DB.SCH.B')
+$twoLastAlteredSame = $now.AddDays(-1)
+
+# two_object -- source_rows [100,200], both source_last_altered baselined to
+# the same instant, age 90 (past the default 60-minute window). Covers rows
+# 1-9 of TASK.md's "Measured facts" matrix at call time via different
+# -CurrentRows/-CurrentLastAltered values against this one fixture, including
+# row 9's [null,null] -> SKIPPED (no evidence) case (D1).
+$f = New-DecideFieldsMulti -SourceObjects $twoObjects -MaterializedAt $now.AddMinutes(-90) `
+    -RowsBaseline @(100, 200) -SourceBytesBaseline @(2048, 2048) `
+    -LastAlteredBaseline @($twoLastAlteredSame, $twoLastAlteredSame)
+$f['name'] = 'two_object'
+New-DecideExtract -Name 'two_object' -Fields $f
+
+# two_object_w6 -- source_rows [100,null]: object A has a real baseline,
+# object B has none. Covers the tenth (W6) row: current [100,null] with
+# object B's last_altered moved aggregates to
+# "SKIPPED (ambiguous: last_altered moved, rows unchanged)", where rows
+# unchanged is true for A and never evaluated for B (its current rows value
+# is the literal "null", so Test-RowsStage skips it regardless of baseline).
+$f = New-DecideFieldsMulti -SourceObjects $twoObjects -MaterializedAt $now.AddMinutes(-90) `
+    -RowsBaseline @(100, $null) -SourceBytesBaseline @(2048, 2048) `
+    -LastAlteredBaseline @($twoLastAlteredSame, $twoLastAlteredSame)
+$f['name'] = 'two_object_w6'
+New-DecideExtract -Name 'two_object_w6' -Fields $f
 
 Write-Output "decide fixtures regenerated under $resolvedRoot"
