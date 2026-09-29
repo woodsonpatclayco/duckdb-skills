@@ -70,6 +70,17 @@ DSK_FORCE must be exactly the string "1" to force a refresh; any other value,
 freshness window; DSK_MAX_AGE_MINUTES (unset means 1440) bounds the ambiguous
 and no-evidence branches only -- an unchanged last_altered is never bounded,
 since it means genuinely unaltered.
+
+registry.sql separately rejects any sidecar whose source_rows/source_bytes/
+source_last_altered array is not the same length as source_objects, surfaced
+here as "REFRESH (malformed sidecar: parallel array mismatch)" before stage 1
+ever runs. This is the only thing closing a silent hole: Test-RowsStage and
+Test-LastAlteredStage both loop on $Baseline.Count, and PowerShell returns
+$null for an out-of-range array read rather than throwing, so a shorter
+array would silently skip source objects and a longer one would silently
+ignore supplied current values. Nothing in this script itself enforces those
+lengths -- a future refactor must not remove registry.sql's check on the
+assumption this script already guards it.
 #>
 param(
     [string]$Name,
