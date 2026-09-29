@@ -2,9 +2,9 @@
 tools\check-contract.ps1 <contract.sql>
 
 Single-contract runner for TASK.md's `-- @assert <name>: <expr>` grammar (item 4,
-Decision 1). Parses and validates every directive in the file, THEN creates the view
-and runs each assertion, reporting PASS/FAIL/ERROR per assertion by name. Exits
-non-zero if either guard trips or any assertion is not PASS.
+Decision 1, as amended by item 5b). Parses and validates every directive in the file,
+THEN creates the view and runs each assertion, reporting PASS/FAIL/ERROR per assertion
+by name. Exits non-zero if the remaining guard trips or any assertion is not PASS.
 
 Boundary with item 5: this proves the grammar executes for one contract. It does not
 own multi-contract aggregation, floor derivation, or tolerance rules -- that is item 5.
@@ -18,21 +18,47 @@ depending on any gitignored state"): skills/query/duckdb-compat.sql is resolved 
 via .duckdb-skills\state.sql (gitignored, so a fresh `git worktree add` checkout does
 not have it -- AC0). This mirrors tools\ensure-duckdb-compat.ps1:51's existing pattern.
 
-Grammar (TASK.md Decision 1), summarized:
+Grammar (TASK.md Decision 1, item 4, as amended by item 5b), summarized:
   - A directive: a line whose first non-whitespace characters are `--`, optional
-    whitespace, then `@assert`. `--@assert` (no space) counts.
-  - Full grammar: `--[ ]@assert[ ]<name>[ ]:<expr>` where <name> matches
+    whitespace, then `@` and a keyword. `--@assert` (no space) counts.
+  - `-- @assert` full grammar: `--[ ]@assert[ ]<name>[ ]:<expr>` where <name> matches
     ^[A-Za-z0-9_]+$, ends at the first `:`, and must be unique in the file. Everything
     after the first `:`, trimmed, is <expr>, which must not contain `;`.
   - Each <expr> runs verbatim as `SELECT <expr>;` (no FROM appended). The result must
     be exactly one row, one column, BOOLEAN, value true to PASS. NULL is a FAIL, not an
     error. A non-boolean type, more than one row/column, or a DuckDB error is an ERROR.
-  - Guard 1: zero parsed assertions in the whole file is an error.
-  - Guard 2: a line matching "is a directive" but not the full grammar (missing colon,
-    invalid/duplicate name, or `;` in the expression) is an error, never silently
-    skipped.
-  - Both guards are evaluated BEFORE the view is created, so a malformed contract fails
-    without paying the 68 MB workbook read.
+  - `-- @assert` is now OPTIONAL: zero parsed assertions in the whole file is VALID
+    (item 5b removes the former Guard 1, which rejected zero assertions -- a
+    quality-free contract, one declaring no opinion about the data, is legitimate).
+    `assertion_count=0`, exit 0, unless the unknown-directive guard below trips.
+  - Guard 2 (unchanged, kept): a line matching "is a directive" but not the full
+    `@assert` grammar (missing colon, invalid/duplicate name, or `;` in the expression)
+    is an error, never silently skipped.
+  - Unknown-directive guard (NEW, item 5b -- replaces the former Guard 1). For each
+    line, match `^\s*--\s*@([A-Za-z0-9_]+)` and take the MAXIMAL captured word. If it is
+    not EXACTLY (case-sensitive) one of the seven known keywords -- `sheet`,
+    `fingerprint`, `anchor`, `rows_floor`, `assert`, `snapshot`, `snapshot_committed` --
+    emit an error naming the exact word and exit non-zero, before any view is created.
+    This catches item 5's four run-assertions.ps1 directives too (`@sheet`, `@anchor`,
+    `@rows_floor`, `@fingerprint`, `@snapshot`, `@snapshot_committed`) even though this
+    script itself never parses them, because a contract carrying a typo'd one of those
+    (e.g. `-- @rows_floo: 50000`) would otherwise be silently invisible to a standalone
+    run of this tool. Deliberately NOT a regex alternation of the seven keywords (that
+    form accepts `@snapshotX`, `@sheets`, `@assertion`, `@snapshot_committedX` as valid
+    -- see TASK.md's table); it is exact whole-word membership testing after maximal
+    capture. Known residual: `-- @ assert` (whitespace between `@` and the keyword) is
+    not directive-shaped under this pattern and is not caught -- see RESULT-1.md.
+  - Both remaining checks (Guard 2, the unknown-directive guard) are evaluated BEFORE
+    the view is created, so a malformed contract fails without paying the 68 MB
+    workbook read.
+
+Why the unknown-directive guard replaces the former Guard 1 (item 5b, TASK.md AC3):
+Guard 1 only ever fired when a misspelled `-- @asert` was the file's ONLY assertion --
+it caught the case that mattered least. A file with one valid `-- @assert` plus a
+misspelled `-- @asert` sailed through Guard 1 (assertion_count=1, exit 0) with the typo
+silently dropped, because a malformed keyword never matches `@assert`'s own directive
+pattern and so never even reaches Guard 2. The unknown-directive guard closes that hole
+by testing every `--\s*@<word>` line regardless of which keyword it resembles.
 
 Each assertion is evaluated in its own `duckdb -json -f <temp file>` invocation
 (macros + contract + that one `SELECT <expr>;`), so one assertion's DuckDB error can
@@ -67,12 +93,41 @@ if (-not (Test-Path -LiteralPath $compatFullPath -PathType Leaf)) {
 }
 $compatFwd = $compatFullPath -replace '\\', '/'
 
-# --- parse directives (both guards run here, before any view is created) ----------
+# --- unknown-directive guard (item 5b, replaces the former Guard 1) ---------------
+# Maximal-word extraction, never an alternation of the seven keywords -- see the
+# header comment and TASK.md's table for why an alternation without \b reintroduces
+# the exact hole this guard exists to close (it would accept @snapshotX, @sheets,
+# @assertion, @snapshot_committedX as valid). Membership is exact and case-sensitive.
+$knownDirectiveKeywords = @('sheet', 'fingerprint', 'anchor', 'rows_floor', 'assert', 'snapshot', 'snapshot_committed')
+$unknownDirectivePattern = '^\s*--\s*@([A-Za-z0-9_]+)'
+
+$lines = Get-Content -LiteralPath $contractFullPath
+$unknownDirectiveErrors = New-Object System.Collections.Generic.List[string]
+
+$lineNumber = 0
+foreach ($line in $lines) {
+    $lineNumber++
+    $um = [regex]::Match($line, $unknownDirectivePattern)
+    if (-not $um.Success) { continue }
+    $word = $um.Groups[1].Value
+    if ($knownDirectiveKeywords -cnotcontains $word) {
+        $unknownDirectiveErrors.Add("line ${lineNumber}: unknown directive: -- @$word")
+    }
+}
+
+if ($unknownDirectiveErrors.Count -gt 0) {
+    Write-Output 'UNKNOWN DIRECTIVE GUARD FAILED:'
+    foreach ($e in $unknownDirectiveErrors) { Write-Output "  $e" }
+    exit 1
+}
+
+# --- parse @assert directives (Guard 2 runs here, before any view is created) ----
+# Zero parsed assertions is now VALID (item 5b removes the former Guard 1): a
+# quality-free contract -- one declaring no opinion about the data -- is legitimate.
 
 $directiveLinePattern = '^\s*--\s*@assert\b'
 $fullGrammarPattern = '^\s*--\s*@assert\s*([A-Za-z0-9_]+)\s*:(.*)$'
 
-$lines = Get-Content -LiteralPath $contractFullPath
 $assertions = New-Object System.Collections.Generic.List[object]
 $seenNames = New-Object System.Collections.Generic.HashSet[string]
 $guardErrors = New-Object System.Collections.Generic.List[string]
@@ -108,12 +163,8 @@ if ($guardErrors.Count -gt 0) {
     exit 1
 }
 
-if ($assertions.Count -eq 0) {
-    Write-Output "GUARD 1 FAILED: zero @assert directives parsed from: $contractFullPath"
-    exit 1
-}
-
 # --- guards passed; now (and only now) does any assertion pay the 68 MB read ------
+# (zero assertions is valid and simply skips the loop below -- assertion_count=0)
 
 $scratchDir = Join-Path $env:TEMP "check-contract-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
