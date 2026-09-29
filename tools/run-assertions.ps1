@@ -20,21 +20,52 @@ new additive directives it parses itself (see below), the truncation/orphan-colu
 detector, the anchor and rows-floor gates, and the fingerprint drift report.
 
 Additive directives (deliverable 1) -- same comment form as `-- @assert`, same
-before-any-heavy-read guard timing, same "missing or duplicated is an error, never
-skipped" rule, but they do not alter item 4's `-- @assert` grammar or its two guards in
-any way:
-    -- @sheet: <sheet name>            (used for this script's OWN raw-sheet reads;
-                                         the workbook PATH is never duplicated here --
-                                         it is read out of the contract's own
+before-any-heavy-read guard timing, but they do not alter item 4's `-- @assert` grammar
+or its two guards in any way. As of item 5b, only `@sheet` and `@fingerprint` are
+"needs no opinion about the data" and stay REQUIRED exactly once; `@anchor` and
+`@rows_floor` each encode an opinion Phil has to choose, so they are now OPTIONAL
+(zero or one -- more than one is still a duplicate error, and a present-but-malformed
+value is still an error):
+    -- @sheet: <sheet name>            (REQUIRED. Used for this script's OWN raw-sheet
+                                         reads; the workbook PATH is never duplicated
+                                         here -- it is read out of the contract's own
                                          read_xlsx(...) call by regex, per the spec)
-    -- @anchor: <bare column name>      (double-quoted by this script when building SQL,
+    -- @fingerprint: <col1>|<col2>|...  (REQUIRED, pipe-joined, in order, exactly as
+                                         item 4's own committed header comment already
+                                         does. No opinion about the data -- it restates
+                                         the view's own output column list, catching an
+                                         edit to the contract's SELECT the author forgot
+                                         to re-declare. It does NOT detect an upstream
+                                         rename -- DuckDB's binder catches that first,
+                                         as an ERROR, before the fingerprint is ever
+                                         evaluated -- and must never be auto-derived: a
+                                         self-derived fingerprint always matches, which
+                                         destroys the one thing it catches.)
+    -- @anchor: <bare column name>      (OPTIONAL -- "this column is always populated"
+                                         is an opinion Phil has to have. When absent, no
+                                         ANCHOR line is emitted -- not a placeholder.
+                                         Double-quoted by this script when building SQL,
                                          so a hostile name like `Job #` is written plain)
-    -- @rows_floor: <integer>
-    -- @fingerprint: <col1>|<col2>|...  (pipe-joined, in order, exactly as item 4's own
-                                         committed header comment already does)
-Each of the four is required exactly once; zero or more-than-one is an ERROR line for
-that contract, and (matching item 4's Guard 2) a line that starts like a directive but
-does not match the grammar is an ERROR too, never silently skipped.
+    -- @rows_floor: <integer>           (OPTIONAL -- a threshold is an opinion Phil has
+                                         to choose. When absent, no ROWS_FLOOR line is
+                                         emitted, and the count never falls through to
+                                         any default floor value.)
+A missing `@sheet` or `@fingerprint`, or a duplicated `@anchor` or `@rows_floor`, is an
+ERROR line for that contract, and (matching item 4's Guard 2) a line that starts like a
+directive but does not match its own grammar is an ERROR too, never silently skipped.
+
+Unknown-directive guard (item 5b, NEW -- added to both this script and
+check-contract.ps1, same seven-keyword set, same form, run independently in each so
+neither tool is the one entry point that silently drops a typo). For each line, match
+`^\s*--\s*@([A-Za-z0-9_]+)` and take the MAXIMAL captured word; if it is not EXACTLY
+(case-sensitive) one of `sheet`, `fingerprint`, `anchor`, `rows_floor`, `assert`,
+`snapshot`, `snapshot_committed`, emit `ERROR,<contract>,unknown directive: -- @<word>`
+before any workbook read. Deliberately NOT a regex alternation of the seven keywords --
+that form (no `\b`) accepts `@snapshotX`, `@sheets`, `@assertion`, and
+`@snapshot_committedX` as valid, reintroducing the exact hole this guard exists to
+close. Known residual, not closed here: `-- @ assert` (whitespace between `@` and the
+keyword) is not directive-shaped under this pattern and is silently ignored -- see
+RESULT-1.md.
 
 Macro availability: skills/query/duckdb-compat.sql is resolved relative to
 $PSScriptRoot (Join-Path $PSScriptRoot '..\skills\query\duckdb-compat.sql'), exactly
@@ -58,9 +89,13 @@ so each TASK.md mutation is a single-line edit).
 Output contract (TASK.md deliverable 2, pinned so a caller can grep a line by its
 label rather than parse prose): one CONTRACT,<name> per contract; one
 ASSERT,<name>,<status>[,<detail>] per `-- @assert` (status is PASS/FAIL/ERROR, inherited
-verbatim from check-contract.ps1); TRUNCATION_DEFAULT_ROWS / TRUNCATION_WITHDATA_ROWS /
-TRUNCATION_ROWS_LOST; CONSISTENCY_VIEW_ROWS; ANCHOR,<name>,<nonnull>,<PASS|FAIL>;
-ROWS_FLOOR,<floor>,<observed>,<PASS|FAIL>; FINGERPRINT,MATCH or FINGERPRINT,DRIFT
+verbatim from check-contract.ps1, and there may be zero of these -- @assert is optional
+as of item 5b); TRUNCATION_DEFAULT_ROWS / TRUNCATION_WITHDATA_ROWS /
+TRUNCATION_ROWS_LOST; CONSISTENCY_VIEW_ROWS; ANCHOR,<name>,<nonnull>,<PASS|FAIL> --
+emitted ONLY when the contract declares `-- @anchor` (item 5b: no placeholder line such
+as ANCHOR,NONE is emitted when it is absent, since that would need a status outside
+this enum); ROWS_FLOOR,<floor>,<observed>,<PASS|FAIL> -- emitted ONLY when the contract
+declares `-- @rows_floor`, same reasoning; FINGERPRINT,MATCH or FINGERPRINT,DRIFT
 followed by FINGERPRINT_COMMITTED,<list> and FINGERPRINT_OBSERVED,<list> (drift is
 reported, never a failure -- items 3+4's policy, retained); SNAPSHOT,<name>,<value>
 per `-- @snapshot` (round 2, C1/C2 below) followed by SNAPSHOT_DRIFT,<name>,
@@ -71,7 +106,9 @@ read); and a final SUMMARY,contracts=<n>,assertions=<n>,failures=<n> line. `fail
 counts every individual failing signal across the whole run (each non-PASS assertion,
 each ERROR, each truncation/consistency/anchor/floor problem) -- not just failing
 contracts. SNAPSHOT and SNAPSHOT_DRIFT lines are never counted, by design (see below).
-Exit code is non-zero iff failures > 0.
+Truncation and consistency run for EVERY contract, unconditionally -- they need no
+opinion about the data and so are never gated by any directive's presence. Exit code
+is non-zero iff failures > 0.
 
 Round 2, C1/C2 -- a fifth and sixth additive directive family, `-- @snapshot` and
 `-- @snapshot_committed`, named and paired (unlike @sheet/@anchor/@rows_floor/
@@ -194,6 +231,32 @@ function Get-NamedDirectiveOccurrences {
     [pscustomobject]@{ ByName = $byName; Malformed = $malformed; Duplicates = $duplicates }
 }
 
+# --- unknown-directive guard (item 5b, deliverable 1). Maximal-word extraction, never
+# an alternation of the seven keywords -- an alternation without \b accepts @snapshotX,
+# @sheets, @assertion, @snapshot_committedX as valid, reintroducing the exact hole this
+# guard exists to close. Membership is exact and case-sensitive. Same seven-keyword set
+# and same form as check-contract.ps1's own copy of this guard, run independently here
+# so this script does not depend on check-contract.ps1 to catch a typo in one of ITS
+# OWN four additive directives (@sheet/@anchor/@rows_floor/@fingerprint), which
+# check-contract.ps1 never parses at all. -----------------------------------------------
+$knownDirectiveKeywords = @('sheet', 'fingerprint', 'anchor', 'rows_floor', 'assert', 'snapshot', 'snapshot_committed')
+$unknownDirectivePattern = '^\s*--\s*@([A-Za-z0-9_]+)'
+function Get-UnknownDirectiveErrors {
+    param([string[]]$Lines)
+    $errors = New-Object System.Collections.Generic.List[string]
+    $ln = 0
+    foreach ($line in $Lines) {
+        $ln++
+        $um = [regex]::Match($line, $unknownDirectivePattern)
+        if (-not $um.Success) { continue }
+        $word = $um.Groups[1].Value
+        if ($knownDirectiveKeywords -cnotcontains $word) {
+            $errors.Add("unknown directive: -- @$word")
+        }
+    }
+    $errors
+}
+
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $totalAssertions = 0
 $totalFailures = 0
@@ -204,13 +267,16 @@ foreach ($cf in $contractFiles) {
     $baseName = [System.IO.Path]::GetFileNameWithoutExtension($cf)
     Write-Output "CONTRACT,$baseName"
 
-    # --- parse the four additive directives; BOTH guard families (missing/duplicate,
+    # --- parse directives; ALL guard families (unknown directive, missing/duplicate,
     # malformed line) run before anything heavy, same discipline as item 4's guards ---
     $lines = Get-Content -LiteralPath $cf
     $dirErrors = New-Object System.Collections.Generic.List[string]
     $dirValues = @{}
 
-    foreach ($kw in @('sheet', 'anchor', 'rows_floor', 'fingerprint')) {
+    foreach ($e in (Get-UnknownDirectiveErrors -Lines $lines)) { $dirErrors.Add($e) }
+
+    # @sheet and @fingerprint need no opinion about the data -- required exactly once.
+    foreach ($kw in @('sheet', 'fingerprint')) {
         $res = Get-DirectiveOccurrences -Lines $lines -Keyword $kw
         foreach ($e in $res.Malformed) { $dirErrors.Add($e) }
         if ($res.Malformed.Count -eq 0) {
@@ -219,6 +285,22 @@ foreach ($cf in $contractFiles) {
             } elseif ($res.Values.Count -gt 1) {
                 $dirErrors.Add("duplicate directive: -- @$kw (found $($res.Values.Count) times)")
             } else {
+                $dirValues[$kw] = $res.Values[0]
+            }
+        }
+    }
+
+    # @anchor and @rows_floor each encode an opinion Phil has to choose -- optional
+    # (item 5b): zero occurrences is valid and simply leaves the key absent from
+    # $dirValues; more than one is still a duplicate error, and a malformed line is
+    # still an error, exactly as before.
+    foreach ($kw in @('anchor', 'rows_floor')) {
+        $res = Get-DirectiveOccurrences -Lines $lines -Keyword $kw
+        foreach ($e in $res.Malformed) { $dirErrors.Add($e) }
+        if ($res.Malformed.Count -eq 0) {
+            if ($res.Values.Count -gt 1) {
+                $dirErrors.Add("duplicate directive: -- @$kw (found $($res.Values.Count) times)")
+            } elseif ($res.Values.Count -eq 1) {
                 $dirValues[$kw] = $res.Values[0]
             }
         }
@@ -261,8 +343,10 @@ foreach ($cf in $contractFiles) {
     }
 
     $sheetName = $dirValues['sheet']
-    $anchorExpr = $dirValues['anchor']
-    $rowsFloor = $rowsFloorInt
+    $anchorPresent = $dirValues.ContainsKey('anchor')
+    $anchorExpr = if ($anchorPresent) { $dirValues['anchor'] } else { $null }
+    $rowsFloorPresent = $dirValues.ContainsKey('rows_floor')
+    $rowsFloor = if ($rowsFloorPresent) { $rowsFloorInt } else { $null }
     $committedFingerprint = $dirValues['fingerprint']
 
     # Workbook path is read from the contract's OWN read_xlsx(...) call -- never
@@ -302,7 +386,7 @@ foreach ($cf in $contractFiles) {
             $totalAssertions++
             $assertionsThisContract++
             if ($status -ne 'PASS') { $totalFailures++ }
-        } elseif ($line -match '^GUARD [12] FAILED') {
+        } elseif ($line -match '^(GUARD 2 FAILED|UNKNOWN DIRECTIVE GUARD FAILED)') {
             Write-Output "ERROR,$baseName,$line"
             $sawBlockingError = $true
             $totalFailures++
@@ -380,7 +464,15 @@ foreach ($cf in $contractFiles) {
         $withDataWhere = "NOT ($allNullPredicate)"
         # ---- MUTATION POINT ends here. ----
 
-        $anchorSql = 'count("' + ($anchorExpr -replace '"', '""') + '")'
+        # @anchor is optional as of item 5b; $anchorSql is built only when declared, and
+        # the ANCHOR_TOTAL/ANCHOR_NONNULL SELECTs below are skipped entirely when it is
+        # not -- both the SQL text and the later required-key check must agree on this,
+        # or a missing @anchor would either error spuriously or (if the required-key
+        # check still demanded the two keys) silently skip every remaining line for
+        # this contract, including TRUNCATION_*/CONSISTENCY_*/FINGERPRINT.
+        if ($anchorPresent) {
+            $anchorSql = 'count("' + ($anchorExpr -replace '"', '""') + '")'
+        }
 
         # --- Phase 2: one heavy invocation per contract. Materializes contract_view
         # once (so every later reference to it is cheap) and separately materializes
@@ -401,8 +493,10 @@ foreach ($cf in $contractFiles) {
         [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName');`r`n")
         [void]$body.Append("SELECT 'WITHDATA_ROWS', count(*) FROM _raw_withdata;`r`n")
         [void]$body.Append("SELECT 'VIEW_ROWS', count(*) FROM contract_view;`r`n")
-        [void]$body.Append("SELECT 'ANCHOR_TOTAL', count(*) FROM contract_view;`r`n")
-        [void]$body.Append("SELECT 'ANCHOR_NONNULL', $anchorSql FROM contract_view;`r`n")
+        if ($anchorPresent) {
+            [void]$body.Append("SELECT 'ANCHOR_TOTAL', count(*) FROM contract_view;`r`n")
+            [void]$body.Append("SELECT 'ANCHOR_NONNULL', $anchorSql FROM contract_view;`r`n")
+        }
         [void]$body.Append("SELECT 'FINGERPRINT_OBSERVED', string_agg(column_name, '|' ORDER BY column_index) FROM duckdb_columns() WHERE table_name = 'contract_view';`r`n")
         # Round 2 C1/C2: one SELECT per @snapshot, same self-contained-scalar-subquery
         # shape as an @assert expression -- evaluated in this same batch so a snapshot
@@ -434,22 +528,33 @@ foreach ($cf in $contractFiles) {
             }
         }
 
-        foreach ($k in @('DEFAULT_ROWS', 'WITHDATA_ROWS', 'VIEW_ROWS', 'ANCHOR_TOTAL', 'ANCHOR_NONNULL', 'FINGERPRINT_OBSERVED')) {
+        # Required-key set depends on whether @anchor was declared -- this list must
+        # track the conditional SELECTs above exactly, or a missing @anchor would
+        # either be reported as "expected value missing" (spurious) or (if ANCHOR_TOTAL/
+        # ANCHOR_NONNULL were left in unconditionally) skip every remaining line for
+        # this contract, per the trap recorded in TASK.md.
+        $requiredKeys = @('DEFAULT_ROWS', 'WITHDATA_ROWS', 'VIEW_ROWS', 'FINGERPRINT_OBSERVED')
+        if ($anchorPresent) { $requiredKeys += @('ANCHOR_TOTAL', 'ANCHOR_NONNULL') }
+
+        $missingKey = $false
+        foreach ($k in $requiredKeys) {
             if (-not $values.ContainsKey($k)) {
                 Write-Output "ERROR,$baseName,expected value '$k' missing from phase 2 output"
                 $totalFailures++
-                continue
+                $missingKey = $true
             }
         }
-        if (-not ($values.ContainsKey('DEFAULT_ROWS') -and $values.ContainsKey('WITHDATA_ROWS') -and $values.ContainsKey('VIEW_ROWS') -and $values.ContainsKey('ANCHOR_TOTAL') -and $values.ContainsKey('ANCHOR_NONNULL') -and $values.ContainsKey('FINGERPRINT_OBSERVED'))) {
+        if ($missingKey) {
             continue
         }
 
         $defaultRows = [int64]$values['DEFAULT_ROWS']
         $withDataRows = [int64]$values['WITHDATA_ROWS']
         $viewRows = [int64]$values['VIEW_ROWS']
-        $anchorTotal = [int64]$values['ANCHOR_TOTAL']
-        $anchorNonNull = [int64]$values['ANCHOR_NONNULL']
+        if ($anchorPresent) {
+            $anchorTotal = [int64]$values['ANCHOR_TOTAL']
+            $anchorNonNull = [int64]$values['ANCHOR_NONNULL']
+        }
         $observedFingerprint = $values['FINGERPRINT_OBSERVED']
 
         $rowsLost = $withDataRows - $defaultRows
@@ -461,13 +566,25 @@ foreach ($cf in $contractFiles) {
         Write-Output "CONSISTENCY_VIEW_ROWS,$viewRows"
         if ($viewRows -ne $withDataRows) { $totalFailures++ }
 
-        $anchorStatus = if ($anchorNonNull -eq $anchorTotal) { 'PASS' } else { 'FAIL' }
-        Write-Output "ANCHOR,$anchorExpr,$anchorNonNull,$anchorStatus"
-        if ($anchorStatus -ne 'PASS') { $totalFailures++ }
+        # @anchor is optional (item 5b): when not declared, no ANCHOR line is emitted --
+        # not a placeholder such as ANCHOR,NONE, which would need a status outside item
+        # 6's PASS|FAIL|DRIFT|ERROR enum.
+        if ($anchorPresent) {
+            $anchorStatus = if ($anchorNonNull -eq $anchorTotal) { 'PASS' } else { 'FAIL' }
+            Write-Output "ANCHOR,$anchorExpr,$anchorNonNull,$anchorStatus"
+            if ($anchorStatus -ne 'PASS') { $totalFailures++ }
+        }
 
-        $floorStatus = if ($viewRows -ge $rowsFloor) { 'PASS' } else { 'FAIL' }
-        Write-Output "ROWS_FLOOR,$rowsFloor,$viewRows,$floorStatus"
-        if ($floorStatus -ne 'PASS') { $totalFailures++ }
+        # @rows_floor is optional (item 5b): when not declared, no ROWS_FLOOR line is
+        # emitted. $rowsFloor is $null in that case and must never fall through to any
+        # default floor value (in particular never 0 -- "count >= 0" is always true,
+        # which would emit a spurious ROWS_FLOOR,0,<n>,PASS, exactly the invented
+        # threshold this item removes).
+        if ($rowsFloorPresent) {
+            $floorStatus = if ($viewRows -ge $rowsFloor) { 'PASS' } else { 'FAIL' }
+            Write-Output "ROWS_FLOOR,$rowsFloor,$viewRows,$floorStatus"
+            if ($floorStatus -ne 'PASS') { $totalFailures++ }
+        }
 
         if ($observedFingerprint -eq $committedFingerprint) {
             Write-Output 'FINGERPRINT,MATCH'

@@ -2,9 +2,9 @@
 name: lakehouse
 description: >
   Query the materialized contracts lakehouse (DuckLake) and read its check
-  history. Freshness is four-way (workbook mtime+SHA-256, contract SHA-256,
-  compat SHA-256); SKIPPED writes no history rows, REFUSED does. Data is real
-  Parquet under DATA_PATH; time travel via AT (VERSION => n).
+  history. Freshness is four-way; SKIPPED writes no history rows, REFUSED
+  does. Quality directives (@anchor/@rows_floor/@assert) are opt-in -- a
+  contract without them still gets truncation, consistency, fingerprint checks.
 allowed-tools: Bash
 ---
 
