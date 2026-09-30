@@ -127,3 +127,10 @@ refresh repeatedly, not once.
 Settled by construction: the random 8-hex suffix per materialize plus the `REMOVE`
 after `GET` means two sessions choosing the same extract name cannot collide on the
 stage. `publish-extract.ps1`'s rename-aside sequence settles the local side.
+
+## Joining an extract to a lake table
+
+`tools\cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
+in a single SQL statement, printing the age of both inputs beside the answer -- see the README's
+"Joining a Snowflake extract to a workbook sheet" section for the walkthrough and the freshness rule.
+

@@ -108,3 +108,10 @@ Decision 1 keeps only the verdict), and this tool never recomputes an
 assertion's expression to recover it -- a second evaluation would be a second
 source of truth. `tools\lake-status.ps1 -History <contract>` prints an explicit
 note on every such row for this reason.
+
+## Joining a lake table to a Snowflake extract
+
+`tools\cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
+in a single SQL statement, printing the age of both inputs beside the answer -- see the README's
+"Joining a Snowflake extract to a workbook sheet" section for the walkthrough and the freshness rule.
+
