@@ -114,6 +114,47 @@ POSIX bash and does not run on Windows, so the contradiction is left standing ra
 changes as a result of this note; it records the decision for whichever skill implements Windows
 state-file lookup next.
 
+## Joining a Snowflake extract to a workbook sheet
+
+`tools\cross-query.ps1` answers one question across a Snowflake extract (`tools\snowflake-extract`)
+and a workbook sheet materialized into the DuckLake lakehouse (`tools\materialize.ps1`) in a single
+SQL statement, printing the age of every input beside the answer. Steps, from a clean shell in this
+repo:
+
+1. **`tools\materialize.ps1`** — bring the lake current. A stale lake table (its workbook has
+   changed since the last materialize) is *reported*, never fixed automatically — this tool never
+   refreshes anything on your behalf.
+2. **`tools\list-extracts.ps1`** — see which Snowflake extracts exist and how old they are.
+   Refreshing a stale extract is done through the `snowflake-extract` skill in an agent session, not
+   by any script here — `cross-query.ps1` cannot call Snowflake itself.
+3. **`tools\cross-query.ps1 -Sql examples\job-costs-by-parent-project.sql`** — read the `EXTRACT`,
+   `LAKE` and `RESULT` lines it prints, in that order, before the answer's own CSV rows.
+4. **`tools\cross-query.ps1 -Sql examples\job-costs-unmatched.sql`** — the same two inputs, but an
+   anti-join: GL rows whose parent project is missing from the extract. This is the check a stale
+   extract fails first — a project created in Snowflake after the extract was taken shows up here,
+   even though the join in step 3 quietly drops it.
+5. **`-Save <table>`** — save the joined result as a table in the lake
+   (`tools\cross-query.ps1 -Sql examples\job-costs-by-parent-project.sql -Save gl_by_parent`), then
+   re-query it with `cross-query.ps1 -Sql <a file selecting from lake.gl_by_parent>` so its `SAVED`
+   provenance line prints instead of `LAKE`.
+
+**The freshness rule.** Every input's age prints beside the answer, unconditionally. Nothing is ever
+refused for being old — a stale extract or a lake table whose workbook has changed since it was
+materialized is loud, recorded, and still answered. The reader's window (`DSK_WINDOW_MINUTES`,
+60 minutes by default) decides whether an age counts as `stale`; it never decides whether the query
+runs. A saved join keeps the data it was built from — it does not re-read either source — and every
+time it is read back, it reports the age of its own **oldest** recorded input, not the age of the
+save itself.
+
+**The patterns.** A query given to `cross-query.ps1` may only read `extract_table('<name>')` for a
+Snowflake extract (the name is resolved from the extract registry at run time — the query text never
+contains a path) and `lake.<table>` for a workbook sheet materialized as a contract, or a previously
+saved join. Nothing else is dateable, so nothing else is accepted: a raw `read_parquet`/`read_csv`/
+`read_xlsx`/`read_json` call, a quoted file path, or any other table function is refused. A saved join
+is stored as a real **table**, never a view — a view's `extract_table` macro does not survive into a
+new process, so a saved join that referenced an extract would silently break the moment it was
+re-queried.
+
 ## Local development
 
 To test skills locally from a clone of this repo:
