@@ -249,6 +249,7 @@ $summaryRefreshed = 0
 $summarySkipped = 0
 $summaryRefused = 0
 $summaryForced = 0
+$summaryErrored = 0
 $anyRefused = $false
 
 foreach ($cf in $contractFiles) {
@@ -259,6 +260,7 @@ foreach ($cf in $contractFiles) {
     $pathMatch = [regex]::Match($contractRawText, "read_xlsx\(\s*'([^']+)'", 'IgnoreCase')
     if (-not $pathMatch.Success) {
         Write-Output "ERROR,$contractName,could not find read_xlsx(<path>, ...) in contract file"
+        $summaryErrored++
         $anyRefused = $true
         continue
     }
@@ -268,11 +270,25 @@ foreach ($cf in $contractFiles) {
     $committedFingerprint = Get-ContractDirectiveLiteral -Lines $contractLines -Keyword 'fingerprint'
     $snapshotCommittedMap = Get-ContractSnapshotCommitted -Lines $contractLines
 
+    # --- D: test existence BEFORE the hash read. A missing workbook must not
+    # abort the remaining contracts -- write nothing to manifest/check_history,
+    # leave the lake table untouched, and continue to the next contract. --------
+    if (-not (Test-Path -LiteralPath $workbookPathWin -PathType Leaf)) {
+        Write-Output "MATERIALIZE,$contractName,ERROR"
+        Write-Output "ERROR,$contractName,workbook path does not exist: $workbookPathWin"
+        $summaryErrored++
+        $anyRefused = $true
+        continue
+    }
+
     # --- Hash the workbook via DuckDB, never Get-FileHash (see header comment).
     # This happens BEFORE the lake is touched at all, so a lock here means zero
     # lake interaction -- and it happens on every invocation, unconditionally,
     # because the decision needs it regardless of what else has or hasn't
-    # changed (AC2: this is required by the decision, not a defect). ------------
+    # changed (AC2: this is required by the decision, not a defect). A workbook
+    # that exists but cannot be read (locked, mid-sync) keeps DuckDB's verbatim
+    # error, including the holder's process name and PID, but continues instead
+    # of exiting (D2). ------------------------------------------------------------
     $hashSql = "SELECT 'WBHASH', sha256(content) FROM read_blob('$workbookPathFwd');`r`n"
     $hashResult = Invoke-DuckdbBatch -Sql $hashSql
     $wbHashLine = $hashResult.Lines | Where-Object { $_ -like 'WBHASH,*' } | Select-Object -First 1
@@ -280,15 +296,12 @@ foreach ($cf in $contractFiles) {
         Write-Output "MATERIALIZE,$contractName,ERROR"
         foreach ($l in $hashResult.Lines) { Write-Output $l }
         Write-Output "ERROR,$contractName,could not read workbook at $workbookPathWin (see output above)"
-        exit 1
-    }
-    $sourceSha256 = (Get-CsvField -Line $wbHashLine -Count 2)[1]
-
-    if (-not (Test-Path -LiteralPath $workbookPathWin -PathType Leaf)) {
-        Write-Output "ERROR,$contractName,workbook path does not exist: $workbookPathWin"
+        $summaryErrored++
         $anyRefused = $true
         continue
     }
+    $sourceSha256 = (Get-CsvField -Line $wbHashLine -Count 2)[1]
+
     $sourceMtime = (Get-Item -LiteralPath $workbookPathWin).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')
 
     $contractSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $cf).Hash.ToLowerInvariant()
@@ -522,7 +535,7 @@ SELECT 'SNAPSHOT', max(snapshot_id) FROM lake.snapshots();
     if ($forced) { $summaryForced++ }
 }
 
-Write-Output "SUMMARY,contracts=$($contractFiles.Count),refreshed=$summaryRefreshed,skipped=$summarySkipped,refused=$summaryRefused,forced=$summaryForced"
+Write-Output "SUMMARY,contracts=$($contractFiles.Count),refreshed=$summaryRefreshed,skipped=$summarySkipped,refused=$summaryRefused,forced=$summaryForced,errored=$summaryErrored"
 
 if ($anyRefused) {
     exit 1
