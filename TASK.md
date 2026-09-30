@@ -13,6 +13,11 @@ PLAN-4 §8 (lines 631-650), plus the `Serves:` line (PLAN-4:51-53) and the Risks
 Three parts. **A** is a new runner, `tools\cross-query.ps1`. **B** is a shipped worked example.
 **C** is documentation.
 
+**Phil's decisions, 2026-09-29:** `-Save` stays in scope (the `Serves:` line asks for joined results to be
+saved and re-queryable). Input versions are recorded in a new `lake.join_manifest`, not in item 6's
+`lake.manifest` where PLAN-4:674-675 said they would live — accepted, so `lake.manifest` and
+`materialize.ps1`'s freshness key stay untouched.
+
 ## Measured facts this spec rests on — all taken 2026-09-29 on this machine
 
 **The two landed extracts** (`~\.duckdb-skills\c-users-woodsonp-claude-dev-duckdb-skills\extracts\`),
