@@ -47,6 +47,20 @@ PLAN-5 §"Item 3b", plus fact 7.
    - **SQL comes from files, never from the command line.** This avoids shell quoting of
      `$`, quotes and newlines, the same reason the fork's `read-memories` used `.sql` files.
    - **Standard library plus `snowflake-connector-python` only.**
+   - **Reading the SQL file:** it is read with `encoding='utf-8-sig'`, so a BOM written by
+     PowerShell does not break the read-only guard.
+   - **Output encoding:** before writing anything, sf.py calls
+     `sys.stdout.reconfigure(encoding='utf-8', newline='\n')`. Output is UTF-8 with LF line
+     endings. Measured: without this, redirected output is cp1252 and CSV rows end
+     `\r\r\n`.
+   - **Sign-in messages stay off stdout.** `connect()` runs inside
+     `contextlib.redirect_stdout(sys.stderr)`. The connector's browser sign-in `print()`s
+     (`webbrowser.py:166-177`) then go to stderr, and stdout carries only the result.
+   - **One statement per call.** sf.py uses `cursor.execute()` only, never `execute_string` or
+     `num_statements`. The connector's single-statement default then rejects `SELECT 1;
+     SELECT 2` (measured: `000008 Actual statement count 2 did not match…`). The read-only
+     guard below is a guardrail against mistakes, not a security boundary. The role's
+     privileges are the real limit.
 2. **Mode `query --sql-file <path>`** runs **one** read-only statement and prints its result as
    CSV, with a header row, to stdout.
    - **The read-only guard:** the statement must start, after leading whitespace and `--`
@@ -54,6 +68,7 @@ PLAN-5 §"Item 3b", plus fact 7.
      else is refused with
      `ERROR: sf.py query only runs SELECT/WITH/SHOW/DESCRIBE; use the unload mode for COPY/GET/REMOVE`,
      exit 2, and it never connects.
+   - **CSV format:** written with `csv.writer(sys.stdout, lineterminator='\n')`.
    - **How values print:**
      - `datetime` values as ISO 8601. TZ-aware values are converted to UTC with a `Z`
        suffix.
@@ -64,9 +79,14 @@ PLAN-5 §"Item 3b", plus fact 7.
    --dest <root>\<name>.new`.
    1. **Generate the stage path.** It makes an 8-hex suffix itself, giving
       `@~/duckdb-skills/<project-id>/<name>__<8hex>/`.
-   2. **Unload.** It runs `COPY INTO <stage> FROM (<query>) FILE_FORMAT = (TYPE = PARQUET)
-      HEADER = TRUE OVERWRITE = TRUE`, then reads `rows_unloaded` and `output_bytes` from its
-      result row. It keeps the COPY's query id (`cursor.sfqid`).
+   2. **Unload.**
+      - **Query text:** it strips trailing whitespace and one trailing `;` from the file.
+      - **The statement:** it runs `COPY INTO <stage> FROM (\n<query>\n) FILE_FORMAT = (TYPE =
+        PARQUET) HEADER = TRUE OVERWRITE = TRUE`. The newlines stop a trailing `--` comment
+        from swallowing the `)`.
+      - **What it keeps:** it reads `rows_unloaded` and `output_bytes` from the result row by
+        column name, case-insensitively. It keeps the COPY's query id (`cursor.sfqid`).
+      - **The sidecar's `query`** stays the file text as written.
    3. **Download.** It runs `GET <stage> 'file://<dest with forward slashes>/'`. It creates
       `--dest` first if it is missing.
    4. **Time the unload.** It reads `TOTAL_ELAPSED_TIME` for **that query id** from
@@ -88,9 +108,10 @@ PLAN-5 §"Item 3b", plus fact 7.
    column-quoting rules in step 4 are unchanged.
 5. **The skill text changes, and the rules stay the same.** In `skills\snowflake-extract\SKILL.md`:
    - **`allowed-tools: Bash`:** `snowflake_sql_execute` is removed.
+   - **Where `--project-id` comes from:** the `project-id:` line that `list-extracts` prints.
    - **A new section, "Running Snowflake SQL",** next to "Running the tools". It gives:
      - both `sf.py` forms;
-     - the note that SQL is written to a file first;
+     - the note that SQL is written to a file first, as UTF-8;
      - the `query` mode's read-only rule;
      - the note that an expired token opens a browser sign-in. If one appears, Phil signs in,
        and the call then continues.
@@ -102,15 +123,12 @@ PLAN-5 §"Item 3b", plus fact 7.
      through `sf.py query`.
    - **No other rule changes:** the freshness window, the failed-re-pull rule, the stage
      collision note and the TZ projection rules keep their substance.
-6. **Also in the README:** the snowflake-extract section, if it names `snowflake_sql_execute`,
-   says the Python connector instead. Leave all other README text, including the fork note at
-   lines 5–10 (item 4).
+6. **`README.md` is not changed.** It has no mention of `snowflake_sql_execute`.
 
 ## Deliverables
 
 - `tools\sf.py` (new).
 - `skills\snowflake-extract\SKILL.md`.
-- `README.md`, only per decision 6.
 - `RESULT-1.md` at repo root.
 
 ## Out of scope — do not do these
@@ -137,8 +155,15 @@ PLAN-5 §"Item 3b", plus fact 7.
   - **`sf.py`:** via `Start-Process 'py' -ArgumentList '-3.12', <sf.py>, …`, with the same
     capture.
   - **Never** use `2>`/`2>&1` on these calls.
-- **Sign-in:** if a browser sign-in prompt appears, it needs Phil. Stop and report
-  `NOT RUN (needs sign-in)` rather than waiting indefinitely.
+- **SQL files:** write `.sql` files with `[IO.File]::WriteAllText($p, $sql)`, which gives
+  UTF-8 and no BOM. Never use `Out-File`, `>` or `Set-Content -Encoding UTF8`.
+- **Sign-in:** run every sf.py call with a 180 s timeout.
+  - **If stderr contains `Initiating login request`,** the cached token has expired and a
+    sign-in needs Phil. Mark that check `NOT RUN (needs sign-in)` and stop the Snowflake
+    checks.
+  - **To keep this from happening,** the main session runs a read-only connector sign-in
+    check just before starting the implementer, and again just before the verifier. Any
+    sign-in then happens while Phil is present.
 - **Stage hygiene** is checked from `unload`'s own report. After its `REMOVE`, `unload` writes
   `removed=<n>` to stderr, where n is the number of rows `REMOVE` returned. n must equal
   `len(files)`.
@@ -153,20 +178,22 @@ PLAN-5 §"Item 3b", plus fact 7.
 - **Expect:** exit 2 with the pinned refusal message, and no connection attempt. To prove it,
   run with `--connection NO_SUCH_CONNECTION`. A connection attempt would fail with a
   connection-name error, so getting the refusal instead shows `connect` was never called.
-- **Same for** `-- comment\nDELETE FROM t`: exit 2.
+- **Same for** a file whose two lines are `-- comment` and then `DELETE FROM t`: exit 2.
 
 **AC2 — `query` mode returns metadata the skill needs.**
 - **`SHOW TABLES LIKE 'DT_PROJECTS' IN SCHEMA DB_CONTROL_TOWER.SCH_PROJECT_OPERATIONS`:**
-  CSV with a header that includes `rows` and `bytes`, and 1 data row whose `rows` is a
-  positive integer.
+  stdout has exactly 2 lines. Line 1 contains `rows` and `bytes`, lowercase. Line 2's `rows`
+  is a positive integer.
 - **`SELECT CONVERT_TIMEZONE('UTC', LAST_ALTERED) AS LA FROM DB_CONTROL_TOWER.INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='SCH_PROJECT_OPERATIONS' AND TABLE_NAME='DT_PROJECTS'`:**
-  1 row in ISO 8601 form.
+  header `LA`, then one value matching `^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$`.
 - **`SELECT COLUMN_NAME, DATA_TYPE FROM DB_CONTROL_TOWER.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA='SCH_PROJECT_OPERATIONS' AND TABLE_NAME='DT_PROJECTS' ORDER BY ORDINAL_POSITION`:**
-  107 rows, 2 of them `TIMESTAMP_LTZ`. Quote the count and name the 2.
+  108 lines (header plus 107), 2 of them `TIMESTAMP_LTZ` (`START_DATE`, `FINISH_DATE`).
 
 **AC3 — End-to-end extract of `DT_PROJECTS` through the connector, following the skill text.**
 Follow the new `SKILL.md` "Materialize" steps literally, with name `ac3_dt_projects` and
 `-ExtractRoot $X`.
+- **`--project-id`:** pass `verify-3b`, because `list-extracts -ExtractRoot` prints no
+  project id. The stage path is only a namespace.
 - **Step 4 builds the projected query** from AC2's column list. The 2 LTZ columns become
   `CONVERT_TIMEZONE('UTC', "<col>")::TIMESTAMP_NTZ AS "<col>"`.
 - **`unload`'s JSON:**
@@ -175,8 +202,15 @@ Follow the new `SKILL.md` "Materialize" steps literally, with name `ac3_dt_proje
   - `files` non-empty.
 - **Stage cleaned:** stderr has `removed=<n>`, where n equals `len(files)`.
 - **`publish-extract`:** prints `published <$X>\ac3_dt_projects`.
-- **The sidecar** has `role` `CLYCO_PWRUSR_COST_MGMT_GROUP`, `warehouse` `WH_POWER_USERS_XS`,
-  `database` `DB_CONTROL_TOWER`, `connection` `DATAHUB`, and `runtime_seconds` > 0.
+- **The sidecar** has:
+  - `role` `CLYCO_PWRUSR_COST_MGMT_GROUP`, `warehouse` `WH_POWER_USERS_XS`, `database`
+    `DB_CONTROL_TOWER` and `connection` `DATAHUB`;
+  - `runtime_seconds` > 0;
+  - `source_rows[0]` a positive integer;
+  - `source_last_altered[0]` matching `^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$`.
+
+  Do not pin the row number. `DT_PROJECTS` is a dynamic table: it had 42,257 rows on
+  2026-10-06 against 42,167 on 2026-09-24.
 - **Read-back:** DuckDB's `count(*)` over `$X\ac3_dt_projects\*.parquet` equals the sidecar's
   `row_count`.
 - **`list-extracts -ExtractRoot $X`:** lists `ac3_dt_projects` with `bytes_check=AGREES`.
@@ -198,20 +232,28 @@ the real
   - exit 1;
   - stderr contains `TIMESTAMP_TZ and LTZ types are not supported for unloading to Parquet`;
   - no JSON on stdout;
-  - `--dest` holds no Parquet files.
+  - stderr contains `removed=`;
+  - `--dest` is absent or holds no `*.parquet`.
 
 ## Mutation proof — must fail, then pass again after revert
 
-- **M1:** make `unload` open a **second** connection for the history lookup.
-  **AC3 must fail**, because `runtime_seconds` is missing and stderr has the warning.
+- **M1:** in `$W`, make `unload` open a **second** connection for the history lookup. A second
+  connection is a different session, which `QUERY_HISTORY_BY_SESSION()` does not see.
+  - **Run** `sf.py unload` alone with AC3's `.sql` file and `--dest $X\m1.new`.
+  - **Expect:** exit 0, JSON **without** `runtime_seconds`, and the history warning on stderr.
+  - **After revert:** re-run it. `runtime_seconds` is back and > 0.
 
 Mutate only in `$W`. Revert by re-checking-out the committed file there.
 
 ## Final check — Phil
 
 ```powershell
-cd C:\Users\woodsonp\Claude\Dev\duckdb-skills; py -3.12 .\tools\sf.py query --sql-file <a file containing: SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE()>
+cd C:\Users\woodsonp\Claude\Dev\duckdb-skills; [IO.File]::WriteAllText("$env:TEMP\sf-check.sql", 'SELECT CURRENT_ROLE(), CURRENT_WAREHOUSE()'); py -3.12 .\tools\sf.py query --sql-file "$env:TEMP\sf-check.sql"
 ```
 
-**Expect:** a two-line CSV, header then `CLYCO_PWRUSR_COST_MGMT_GROUP,WH_POWER_USERS_XS`. The
-full extract path gets exercised for real once the plugin is installed (item 4).
+**Expect** exactly two lines:
+- `CURRENT_ROLE(),CURRENT_WAREHOUSE()`
+- `CLYCO_PWRUSR_COST_MGMT_GROUP,WH_POWER_USERS_XS`
+
+If a browser sign-in opens, sign in; the command then finishes. The full extract path gets
+exercised for real once the plugin is installed (item 4).
