@@ -2,8 +2,7 @@
 --
 -- Reads exactly one extract's sidecar and emits one CSV row of derived facts.
 -- Run with `duckdb -csv -f registry.sql`, never `-c` -- PowerShell expands `$`
--- inside double-quoted `-c` strings and breaks any `'$.field'` JSON path (see
--- skills/read-memories/SKILL.md for the same rule applied there).
+-- inside double-quoted `-c` strings and breaks any `'$.field'` JSON path.
 --
 -- Inputs, via environment variables (never substituted into the SQL text):
 --   DSK_EXTRACT_DIR      absolute path to the extract directory (required)
