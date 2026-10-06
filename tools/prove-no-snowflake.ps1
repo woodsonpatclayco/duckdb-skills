@@ -26,7 +26,7 @@ is always "no evidence", never "clean" (D4).
 
 Probe paths never collide: the shim retries "if exist" before creating an
 empty probe file, rather than trusting `%RANDOM%` alone (`cmd.exe` seeds it
-from the clock, and `run-compat-tests.ps1` alone makes several calls a
+from the clock, and a single tool makes several calls a
 second). The exit code is captured into a variable on the line immediately
 after the `duckdb.exe` line, and the call log line is appended only after
 that -- `<label>|<exit code>|<probe path>|<args>`, with literal pipes
@@ -331,7 +331,7 @@ function Invoke-UnshimmedMaterialize {
     }
 }
 
-# --- the 14 main entrypoints, in order (order is load-bearing for the lake rows) ------
+# --- the 12 main entrypoints, in order (order is load-bearing for the lake rows) ------
 function Get-MainEntrypoints {
     return @(
         [pscustomobject]@{ Label = 'check-contract:GL'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\check-contract.ps1', 'contracts\Clayco_Job_Costs_from_GL.sql') },
@@ -344,10 +344,8 @@ function Get-MainEntrypoints {
         [pscustomobject]@{ Label = 'list-extracts'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\list-extracts.ps1', '-ExtractRoot', (Join-Path $fixtureRoot 'ages')) },
         [pscustomobject]@{ Label = 'extract-status'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\extract-status.ps1', '-Name', 'parent_projects', '-ExtractRoot', (Join-Path $fixtureRoot 'ages')) },
         [pscustomobject]@{ Label = 'extract-decide'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\extract-decide.ps1', '-Name', 'parent_projects', '-ExtractRoot', (Join-Path $fixtureRoot 'ages')) },
-        [pscustomobject]@{ Label = 'run-compat-tests'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\run-compat-tests.ps1') },
         [pscustomobject]@{ Label = 'make-truncation-fixtures'; FilePath = 'powershell'; ArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'tools\make-truncation-fixtures.ps1', '-Path', $truncPath) },
-        [pscustomobject]@{ Label = 'gl-facts'; FilePath = 'duckdb'; ArgList = @('-f', 'checks\gl-facts.sql') },
-        [pscustomobject]@{ Label = 'read-memories:search'; FilePath = 'duckdb'; ArgList = @('-csv', '-f', 'skills\read-memories\search.sql') }
+        [pscustomobject]@{ Label = 'gl-facts'; FilePath = 'duckdb'; ArgList = @('-f', 'checks\gl-facts.sql') }
     )
 }
 
@@ -409,18 +407,10 @@ try {
             if ($target.Label -like 'lake-status*') {
                 Invoke-UnshimmedMaterialize -LakeRoot $scratchLake
             }
-            if ($target.Label -eq 'read-memories:search') {
-                $env:DSK_KEYWORD = 'lakehouse'
-                $env:DSK_CWD = ''
-            }
             $r = Invoke-Entrypoint -Label $target.Label -FilePath $target.FilePath -ArgList $target.ArgList -Budget $BudgetSeconds
             $results.Add($r)
         } else {
             foreach ($ep in $mainEntrypoints) {
-                if ($ep.Label -eq 'read-memories:search') {
-                    $env:DSK_KEYWORD = 'lakehouse'
-                    $env:DSK_CWD = ''
-                }
                 $r = Invoke-Entrypoint -Label $ep.Label -FilePath $ep.FilePath -ArgList $ep.ArgList -Budget $BudgetSeconds
                 $results.Add($r)
             }

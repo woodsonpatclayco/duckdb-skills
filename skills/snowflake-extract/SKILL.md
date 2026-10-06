@@ -36,7 +36,7 @@ what it resolved; check it before trusting the answer.
 Before running any query against Snowflake, run `${CLAUDE_PLUGIN_ROOT}/tools/list-extracts.ps1` to see
 whether a named extract already covers the need. This is documentation, not an
 enforceable check -- skills are stateless shell invocations and nothing compels a
-future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
+future session to look first.
 
 ## Materialize (first time, or `-Name` not yet registered)
 

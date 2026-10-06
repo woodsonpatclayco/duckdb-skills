@@ -75,7 +75,7 @@ Search DuckDB and DuckLake documentation and blog posts using full-text search a
 ```
 
 ### `read-memories`
-Search past **Cortex Code** session logs (`~/.snowflake/cortex/conversations/`) to recover context from previous conversations — decisions made, patterns established, open TODOs. Skips injected `<system-reminder>` context and internal `thinking` blocks so hits are real conversation. A separate mode recovers the result sets of SQL queries run in past sessions.
+Search the raw transcripts of past **Claude Code** sessions (`~/.claude/projects/`) to recover the exact wording of earlier conversations. For decisions and conventions, check shared memory first (the `memory_*` tools); use this skill for what shared memory does not hold. It cannot see Cortex Code sessions.
 
 ```
 /duckdb-skills:read-memories <keyword> [--here]
@@ -192,7 +192,7 @@ Skills reference each other where it makes sense:
 
 These skills have been tested upstream on **macOS** and **Linux**. Windows is not fully supported by the upstream skills — some shell commands and path handling may not work as expected.
 
-In this fork, `read-memories` **is** written for and verified on **Windows / PowerShell 5.1**: its SQL ships in a `.sql` file invoked with `duckdb -f` (PowerShell expands `$` inside double-quoted `-c` strings, silently breaking inline JSON paths), and its path handling accepts both `/` and `\` separators.
+`read-memories` is adapted for Windows paths in this fork.
 
 ## Reporting issues & suggestions
 
