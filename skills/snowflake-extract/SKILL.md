@@ -5,7 +5,7 @@ description: >
   that records row-count and last-altered baselines. Reads check the registry
   first and re-pull silently only when stale, via a two-stage row/last_altered
   check that costs no warehouse compute when nothing changed.
-allowed-tools: Bash, snowflake_sql_execute
+allowed-tools: Bash
 ---
 
 Materialize a named Snowflake query to `~\.duckdb-skills\<project-id>\extracts\<name>\`,
@@ -21,6 +21,25 @@ Run every script with
 from the project folder (the tools resolve the project from the current folder).
 Quote the path; it may contain spaces. `dsk-paths.ps1` is a library, not a tool. Read
 the extract root from `list-extracts`' `extract root:` line instead of dot-sourcing it.
+
+## Running Snowflake SQL
+
+All Snowflake SQL goes through one runner, `sf.py`, which uses the Python connector
+(connection `DATAHUB` unless `--connection` says otherwise):
+
+- `py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/sf.py" query --sql-file <f>` runs **one** read-only
+  statement and prints the result as CSV (header row first) on stdout.
+- `py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/sf.py" unload --name <name> --project-id <id>
+  --database <db> --sql-file <query.sql> --dest <root>\<name>.new` does the unload, download,
+  timing lookup and stage cleanup in one session (see Materialize step 5).
+
+SQL is never passed on the command line: write it to a temporary `.sql` file first, as
+UTF-8 (a BOM is tolerated). `query` only accepts `SELECT`, `WITH`, `SHOW` and
+`DESC`/`DESCRIBE`; anything else is refused with exit 2 before connecting. One statement
+per file. Timestamps print as ISO 8601, UTC with a `Z` suffix when timezone-aware.
+
+If the cached sign-in token has expired, a browser sign-in opens mid-run (the prompt
+text goes to stderr, not stdout). Phil signs in, and the call then continues.
 
 ## Which project the tools act on
 
@@ -42,9 +61,10 @@ future session to look first.
 
 1. Resolve the extract root: read
    `${CLAUDE_PLUGIN_ROOT}/tools/list-extracts.ps1`'s `extract root:` header. **Create `<root>` if it is
-   missing (read-only tools no longer create it), then `<root>\<name>.new\`
-   before `GET`** -- `GET` fails `ENOENT` against a directory that does not exist yet.
-2. For each source object: `SHOW TABLES LIKE '<object>'` for `rows` and `bytes`
+   missing (read-only tools no longer create it)**; `sf.py unload` creates
+   `<root>\<name>.new\` itself.
+2. For each source object (each statement written to a `.sql` file and run with
+   `sf.py query`): `SHOW TABLES LIKE '<object>'` for `rows` and `bytes`
    (`source_rows`, `source_bytes`), and
    `SELECT CONVERT_TIMEZONE('UTC', LAST_ALTERED) FROM <db>.INFORMATION_SCHEMA.TABLES
    WHERE ...` for `source_last_altered`.
@@ -63,7 +83,7 @@ future session to look first.
      `<db>.INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '<sch>' AND
      TABLE_NAME = '<obj>' ORDER BY ORDINAL_POSITION`. **Bare `INFORMATION_SCHEMA`
      fails `invalid identifier` on this connection** -- qualify with `<db>`, same
-     trap as `QUERY_HISTORY_BY_SESSION` below.
+     trap as `QUERY_HISTORY_BY_SESSION`, which `sf.py unload` already qualifies.
    - If no column has `DATA_TYPE IN ('TIMESTAMP_TZ','TIMESTAMP_LTZ')`, the query
      stays `SELECT * FROM <object>` -- unchanged for the common case.
    - Otherwise build an explicit column list **in ordinal order** (this is what
@@ -86,21 +106,23 @@ future session to look first.
      and report the column and its type. Do not widen the cast to make it pass.**
      A TZ column nested inside another type is not caught by the check above,
      and this is what turns that miss into a loud stop instead of a silent one.
-5. `COPY INTO @~/duckdb-skills/<project-id>/<name>__<8 hex>/ FROM (<query>)
-   FILE_FORMAT = (TYPE = PARQUET) HEADER = TRUE OVERWRITE = TRUE`. Capture
-   `rows_unloaded` -> `row_count` and `output_bytes`. The random 8-hex suffix means
-   two sessions materializing the same name cannot collide on the stage.
-6. `GET @~/duckdb-skills/<project-id>/<name>__<suffix>/ 'file://<root>/<name>.new/'`.
-7. Look up `TOTAL_ELAPSED_TIME` for that `COPY INTO` via
-   `<db>.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()`, `EXECUTION_STATUS = 'SUCCESS'`
-   only, -> `runtime_seconds`. If unobtainable, omit the field and say so.
+5. Write step 4's query to a temporary `.sql` file and run
+   `py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/sf.py" unload --name <name> --project-id <id>
+   --database <db> --sql-file <query.sql> --dest <root>\<name>.new`. `<id>` is the
+   `project-id:` line `list-extracts` prints. In one connector session it runs
+   `COPY INTO @~/duckdb-skills/<id>/<name>__<8 hex>/ ... (TYPE = PARQUET)`, `GET`s the files
+   into `--dest` (creating it), looks up `TOTAL_ELAPSED_TIME` for that COPY, and `REMOVE`s
+   the stage copy (in a `finally`, so a failure still cleans up; it writes `removed=<n>`
+   to stderr). The random 8-hex suffix means two sessions materializing the same name
+   cannot collide on the stage. It prints one JSON object on stdout; use its `row_count`,
+   `output_bytes` and `runtime_seconds` (omitted only if `unload` omitted it -- say so)
+   in the sidecar. On a COPY failure it prints Snowflake's error to stderr and exits 1;
+   do not retry or widen a cast (see step 4).
 8. `${CLAUDE_PLUGIN_ROOT}/tools/publish-extract.ps1 -Name <name> -StagingDir <root>\<name>.new
-   -SidecarPath <path to the JSON built from steps 2-7> -ExtractRoot <root>`. It
+   -SidecarPath <path to the JSON built from steps 2-5> -ExtractRoot <root>`. It
    stamps `sidecar_version`/`materialized_at`/`window_minutes`/`expires_at` itself --
    do not include them. The sidecar's `query` records step 4's determined query
    verbatim, using `\n` alone as the line separator.
-9. `REMOVE @~/duckdb-skills/<project-id>/<name>__<suffix>/` to stop the stage copy
-   billing storage.
 
 ## Read (an extract already exists)
 
@@ -108,7 +130,7 @@ Call `${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1 -Name <name>` with **no cur
 
 - `FRESH` -- stop. No Snowflake call.
 - `STALE (probe required) age=<n> window=<w> objects=<list>` -- probe each printed
-  object in order (`SHOW TABLES` rows + `LAST_ALTERED`), then call
+  object in order (`SHOW TABLES` rows + `LAST_ALTERED`, each run through `sf.py query`), then call
   `${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1` again with `-CurrentRows`/`-CurrentLastAltered`
   positional against that same object list. For more than one object,
   `powershell -File` cannot bind separate values to an array parameter, so pass
