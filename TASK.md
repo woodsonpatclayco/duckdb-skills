@@ -20,6 +20,24 @@ PLAN-5 §"Item 4".
     interactive dialog.
 - **`claude plugin validate .` on this repo today:** `Validation passed with warnings`, with one
   warning: `description: No marketplace description provided`.
+  - **`--strict` mode:** `validate --strict` exits **1** on that warning.
+  - **The field:** the marketplace expects a top-level `"description"`. Phil's `xlsx-family`
+    marketplace uses exactly that.
+- **The fork has GitHub Issues disabled.** The anonymous API reports `"has_issues": false` for
+  `woodsonpatclayco/duckdb-skills`, the default for forks. An "issues page" link would be dead.
+- **The repo is public and reachable.** `woodsonpatclayco/duckdb-skills` is the right
+  `marketplace add` source form; `xlsx-family` is registered as
+  `GitHub (woodsonpatclayco/xlsx-refresh)`.
+- **What an install copies:** `marketplace add` clones **GitHub**, not the local tree. With
+  `"source": "./"`, the cache copy is every tracked file, `tools\` included. `_data/` and
+  `.duckdb-skills/` are gitignored and absent, and nothing needs them.
+- **`${CLAUDE_PLUGIN_ROOT}` arrives with forward slashes.** Claude Code 2.1.224's plugin skill
+  loader turns backslashes into forward slashes when it substitutes the variable. A session
+  will show `C:/Users/woodsonp/.claude/plugins/cache/…`.
+- **README line 78** (the `read-memories` entry, written in item 3a) ends "It cannot see Cortex
+  Code sessions." It stays.
+- **README lines 191–195 (Platform support)** say Windows is not fully supported. That is
+  upstream's statement, and it stays.
 - **README.md is still written for upstream and Cortex Code in these places:**
   - **Lines 5–10, the fork note:** it says "adapted for Cortex Code" and that `read-memories`
     searches Cortex logs. Both are false since item 3a.
@@ -52,19 +70,26 @@ PLAN-5 §"Item 4".
      `snowflake-extract` skill (Snowflake extracts through the Python connector, `tools\sf.py`).
    - **What it changes:** a Windows-adapted `read-memories`, `xl_date()` in the compat file,
      and project resolution by git root (tools refuse outside a git repo).
-   - **Cortex Code** is not a target of this fork. A Cortex Code install of the upstream
-     project is separate.
+   - **Cortex Code** is not a target of this fork.
+   - **Departs from PLAN-5 item 4,** which said the note "describes both hosts". PLAN-5's own
+     Claude-Code-first decision (commit 13d056a) superseded that. The note names Cortex Code
+     only to say it is not a target.
 3. **Install, update and local-dev sections point at the fork.**
    - **Install:** `/plugin marketplace add woodsonpatclayco/duckdb-skills` and
      `/plugin install duckdb-skills@woodsonp-duckdb-skills`, each with its CLI equivalent
      (`claude plugin marketplace add …`, `claude plugin install …`).
    - **The "From the Discover tab" subsection is deleted.** It describes upstream's listing,
      not this fork.
-   - **Update:** `claude plugin marketplace update woodsonp-duckdb-skills`, then the plugin
-     update. Add one sentence: **a change reaches an installed copy only when `version` in
+   - **Update:** `/plugin marketplace update woodsonp-duckdb-skills` and
+     `/plugin update duckdb-skills@woodsonp-duckdb-skills`, with CLI equivalents
+     `claude plugin marketplace update woodsonp-duckdb-skills` and
+     `claude plugin update duckdb-skills@woodsonp-duckdb-skills`.
+   - **Add one sentence:** **a change reaches an installed copy only when `version` in
      `.claude-plugin\plugin.json` and `marketplace.json` is bumped.**
    - **Local development:** clone the fork, then `claude --plugin-dir .`.
-   - **Issues:** point at the fork's issues page.
+   - **Issues:** the fork has GitHub Issues disabled. Replace the upstream issues link with:
+     "Report problems to the fork's owner; upstream DuckDB bugs go to
+     https://github.com/duckdb/duckdb-skills/issues."
 4. **Two skill entries are added to "Skills",** in the existing style: a heading, 1–3
    sentences, and one example invocation each.
    - **`lakehouse`:** materialize Excel contracts into a DuckLake lake, then check status and
@@ -91,7 +116,9 @@ PLAN-5 §"Item 4".
 - **Any `skills\`, `tools\`, `contracts\` or `checks\` file.**
 - **`.cortex-plugin\`:** it stays as it is, unused by Claude Code.
 - **`version`.**
-- **README sections other than those named in decisions 2–4.**
+- **README sections other than those named in decisions 2–4.** In particular:
+  - line 78's "It cannot see Cortex Code sessions";
+  - Platform support (lines 191–195).
 
 ## Conventions
 
@@ -102,30 +129,35 @@ PLAN-5 §"Item 4".
 ## Acceptance checks
 
 **AC1 — The marketplace validates cleanly.**
-- **Run:** `claude.exe plugin validate $W`.
-- **Expect:** `Validation passed`, with **no** warnings and no errors. Quote the output.
-- **Control:** at base, the same command shows the one `description` warning.
+- **Run:** `claude.exe plugin validate --strict $W`.
+- **Expect:** exit 0 and `Validation passed`. Quote the output.
+- **Control:** at base, the same command exits 1 on the `description` warning.
 
 **AC2 — The README no longer sends anyone to upstream or Cortex Code.**
 - **Run:** `git -C $W grep -n -e "duckdb/duckdb-skills" -e "duckdb-skills@duckdb-skills" -e "Cortex Code" -- README.md`.
-- **Expect, at most:**
-  - the single upstream link in the fork note;
-  - the one sentence saying Cortex Code is not a target.
+- **Expect** every hit to be one of:
+  - a line of the fork note (at most 3 lines) naming upstream or saying Cortex Code is not a
+    target;
+  - line 78's existing sentence, "It cannot see Cortex Code sessions.", unchanged;
+  - the one upstream issues URL from decision 3.
 
-  Quote every hit.
-- **Present, exactly as decision 3 gives them:**
-  - `woodsonpatclayco/duckdb-skills` (install);
-  - `duckdb-skills@woodsonp-duckdb-skills`;
-  - `woodsonp-duckdb-skills` (update);
-  - the version-bump sentence.
+  Quote every hit with its line number.
+- **No stale update line:** `git -C $W grep -n -e "marketplace update duckdb-skills$" -- README.md`
+  returns nothing.
+- **Present:** each of these strings has at least 1 hit in
+  `git -C $W grep -n -F -e "woodsonpatclayco/duckdb-skills" -e "duckdb-skills@woodsonp-duckdb-skills" -e "plugin marketplace update woodsonp-duckdb-skills" -e "plugin update duckdb-skills@woodsonp-duckdb-skills" -- README.md`.
+  Quote the version-bump sentence.
 
 **AC3 — The new skill entries name real skills.**
-- **Each new entry's example invocation** is `/duckdb-skills:lakehouse …` or
-  `/duckdb-skills:snowflake-extract …`.
-- **The skill names in them** match `name:` in `skills\lakehouse\SKILL.md` and
-  `skills\snowflake-extract\SKILL.md`.
+- `git -C $W grep -n -e "/duckdb-skills:lakehouse" -e "/duckdb-skills:snowflake-extract" -- README.md`
+  has at least 1 hit for each.
+- `git -C $W grep -n "^name:" -- skills/lakehouse/SKILL.md skills/snowflake-extract/SKILL.md`
+  gives `name: lakehouse` and `name: snowflake-extract`.
 
 ## Final check — Phil, after merge
+
+**Precondition (the main session, not Phil):** the merge is pushed, so
+`git ls-remote origin refs/heads/main` equals `git rev-parse main`.
 
 Run these in PowerShell (not in the Code tab):
 
@@ -147,13 +179,25 @@ Run these in PowerShell (not in the Code tab):
 - **In this repo:** ask `/duckdb-skills:lakehouse what's the lake status?`. The session runs
   `lake-status.ps1`.
   - **The command line it shows** contains
-    `.claude\plugins\cache\woodsonp-duckdb-skills\duckdb-skills\0.2.4\tools\lake-status.ps1`.
-    That observes the `${CLAUDE_PLUGIN_ROOT}` substitution and the versioned cache folder.
-  - **The output** lists `All_Sales_Data` and `Clayco_Job_Costs_from_GL`, and stderr names
-    `project: c-users-woodsonp-claude-dev-duckdb-skills`.
+    `.claude/plugins/cache/woodsonp-duckdb-skills/duckdb-skills/0.2.4/tools/lake-status.ps1`.
+    Claude Code writes it with forward slashes; backslashes would be equally fine. That
+    observes the `${CLAUDE_PLUGIN_ROOT}` substitution and the versioned cache folder.
+  - **What a failure looks like:** a path under `Claude\Dev\duckdb-skills\tools`, or a literal
+    `${CLAUDE_PLUGIN_ROOT}`, means substitution failed, **even if the output looks right**. In
+    this repo the model could fall back to the repo's own copy of the script.
+  - **The output** lists `All_Sales_Data` and `Clayco_Job_Costs_from_GL`. It also contains
+    `project: c-users-woodsonp-claude-dev-duckdb-skills (C:\Users\woodsonp\Claude\Dev\duckdb-skills)`.
+  - **`Clayco_Job_Costs_from_GL` may show `outcome=REFUSED`** until the real lake is
+    rematerialized (see items 1 and 3a). That is not an install failure.
 - **In a folder that is not a git repo** (for example `Documents`): ask the same thing. It
   answers `ERROR: not inside a git repository: …` (item 1).
 
-If both hold, PLAN-5 archives and `version` is bumped to `0.3.0`. Phil then runs
-`claude plugin marketplace update woodsonp-duckdb-skills` followed by the plugin update to move
-to it.
+If both hold, PLAN-5 archives and `version` is bumped to `0.3.0`. Phil then moves to it with:
+
+```powershell
+& "$env:USERPROFILE\.local\bin\claude.exe" plugin marketplace update woodsonp-duckdb-skills
+```
+
+```powershell
+& "$env:USERPROFILE\.local\bin\claude.exe" plugin update duckdb-skills@woodsonp-duckdb-skills
+```
