@@ -53,19 +53,37 @@ PLAN-5 §"Item 3a", plus fact 7.
      `C--Users-woodsonp-Claude-Dev-duckdb-skills`. Claude Code replaces every character that
      is not `[A-Za-z0-9]` with `-`, applied to the Windows path. `pwd -W | sed
      's/[^A-Za-z0-9]/-/g'` gives the right name from Git Bash.
-  2. **Folder names differ in drive-letter case.** `~\.claude\projects\` holds both
-     `C--Users-woodsonp-OneDrive---Clayco--Inc-Documents` and
-     `c--Users-woodsonp-OneDrive---Clayco--Inc-Documents-Snowflake-Workspace`. Matching must
-     tolerate either case of the drive letter.
+  2. **Folder names differ in drive-letter case, but that does not matter.** `~\.claude\projects\`
+     holds both `C--Users-woodsonp-OneDrive---Clayco--Inc-Documents` and
+     `c--Users-woodsonp-OneDrive---Clayco--Inc-Documents-Snowflake-Workspace`. The reviewer
+     measured that NTFS and DuckDB's glob are both case-insensitive: a wrong-case path still
+     reads the folder. No case handling is needed.
   3. **The `project` column is always empty on Windows.** DuckDB returns `filename` with
      backslashes (`C:\Users\woodsonp\.claude\projects\C--Users-woodsonp\…`), so
      `regexp_extract(filename, 'projects/([^/]+)/', 1)` matches nothing.
 - **`$HOME` and `$PWD` in Git Bash are `/c/Users/…`.** That is a form native `duckdb.exe` must
   not be handed. Use Windows-form paths (`C:/Users/…`, e.g. from `cygpath -m` or `pwd -W`).
 
-**README.** `README.md:6` (the opening fork note) belongs to item 4. `README.md:77-82` describes
-Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` design for
-`read-memories`.
+**README.**
+- **The fork note (lines 5–10)** belongs to item 4. Line 7 ("searches Cortex Code session logs")
+  becomes false after this item, and item 4 rewrites it.
+- **The `read-memories` section** runs from line 77 to line 85. Only line 78 is
+  Cortex-specific.
+- **Line 195** describes the fork's PowerShell/`.sql` design for `read-memories`.
+
+**Other things found by review.**
+- **A second precedent pointer:** `skills\snowflake-extract\registry.sql:5-6` cites
+  `skills/read-memories/SKILL.md` for a rule the restored skill no longer follows.
+- **An entrypoint count:** `prove-no-snowflake.ps1:334` says "the 14 main entrypoints".
+- **`prove-no-snowflake.ps1` fails at the base commit today.** It runs in about 90 seconds.
+  The run gives `SUMMARY,entrypoints=14,pass=13,fail=1`, exit 1.
+  - **The failure:** the `gl-facts` entrypoint. `checks\gl-facts.sql`'s `bare` view reads the
+    GL sheet with type inference on purpose, as a DATE oracle. It hits the same
+    `'City of DeKalb'` cell as the earlier probe bug.
+  - **Scope:** this is not this item's concern. It is dev scaffolding, and Phil decides
+    separately.
+- **After the dialect section goes, no skill text mentions `ensure-duckdb-compat` or
+  `duckdb-compat.md`.** Nothing would tell a query session how to get `xl_date()`.
 
 ## Decisions
 
@@ -76,10 +94,13 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
    - **The file name stays `duckdb-compat.sql`.** Renaming it would touch `materialize`,
      `run-assertions`, `ensure-duckdb-compat` and the item 2 skill text for no gain.
 2. **The query skill loses the dialect section.**
-   - **Deleted:** `skills\query\SKILL.md:164-201`, from the `---` before "Snowflake dialect
-     compatibility" up to but not including the `---` before "DuckDB Friendly SQL
-     Reference".
-   - **What replaces it:** nothing. `xl_date()` is documented in `duckdb-compat.md`.
+   - **Deleted:** the "Snowflake dialect compatibility" section of `skills\query\SKILL.md`.
+   - **Exact lines:** delete lines 164–200, the `---` at 164 through the blank line at 200.
+     The `---` at 201 stays.
+   - **What replaces it:** one short paragraph, so `xl_date()` stays discoverable:
+     > **Excel serial dates.** Run `${CLAUDE_PLUGIN_ROOT}/tools/ensure-duckdb-compat.ps1` once
+     > per project (see "Running the tools"). `xl_date(serial)` then returns a `DATE`. See
+     > `${CLAUDE_PLUGIN_ROOT}/skills/query/duckdb-compat.md`.
    - **The "Running the tools" section from item 2 stays.**
 3. **`duckdb-compat.md` shrinks** to a short page:
    - what `duckdb-compat.sql` holds (`xl_date()`) and why its trailing `::DATE` matters;
@@ -92,9 +113,12 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
 
    Target: under 40 lines.
 4. **Delete** `skills\query\duckdb-compat-tests.csv` and `tools\run-compat-tests.ps1`. In
-   `prove-no-snowflake.ps1`, delete the `run-compat-tests` entrypoint (`:347`) and reword the
-   header sentence at `:29` so it no longer names that script. Make no other change to that
-   file except decision 6's.
+   `prove-no-snowflake.ps1`:
+   - delete the `run-compat-tests` entrypoint (`:347`);
+   - reword the header sentence at `:29` so it no longer names that script;
+   - change `14` to `12` in the comment at `:334`.
+
+   Make no other change to that file except decision 6's.
 5. **`read-memories` is upstream's version, with the three Windows defects fixed and a new
    description.**
    - **Start from** `git show 7feda8e:skills/read-memories/SKILL.md`. Keep its structure, its
@@ -104,9 +128,9 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
        Windows-form home folder (`cygpath -m "$HOME"`).
      - **`--here`:** `<HOME>/.claude/projects/<dir>/*.jsonl`, where `<dir>` is
        `pwd -W | sed 's/[^A-Za-z0-9]/-/g'`.
-     - **Drive-letter case:** the skill tells the model to check whether that folder exists,
-       and if it doesn't, to try the other case of the first character before reporting "no
-       sessions for this project".
+     - **No drive-letter case handling.** Windows paths and DuckDB's glob are
+       case-insensitive (measured).
+   - **Windows only:** do not add a macOS/Linux branch.
    - **The `project` column** uses `regexp_extract(replace(filename, '\', '/'), 'projects/([^/]+)/', 1)`.
    - **The description** (frontmatter) and the first paragraph say, in substance:
      > Search the raw transcripts of past **Claude Code** sessions. For decisions, conventions,
@@ -120,13 +144,16 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
      its two env-setup blocks (`:412-415`, `:420-423`).
    - **`skills\snowflake-extract\SKILL.md:39`:** drop the parenthetical precedent pointer, which
      would cite a line that no longer exists. Keep the sentence it sits in.
+   - **`skills\snowflake-extract\registry.sql:5-6`:** drop the parenthetical
+     `(see skills/read-memories/SKILL.md for the same rule applied there)`. Keep the
+     sentence.
 7. **README.**
-   - **Lines 77–82:** rewritten to describe the restored skill: Claude Code transcripts,
-     shared memory first, and the `--here` example.
-   - **Line 195:** its paragraph about the fork's PowerShell `read-memories` is deleted. If
-     the "Platform support" section then needs one sentence to stay true, add: "`read-memories`
-     is adapted for Windows paths in this fork."
-   - **Leave alone:** line 6 and every other README line.
+   - **Line 78 only:** replace it with a description of the restored skill: Claude Code
+     transcripts, and shared memory first. Lines 77 and 79–85 stay.
+   - **Line 195:** delete its paragraph about the fork's PowerShell `read-memories`, and add
+     the sentence "`read-memories` is adapted for Windows paths in this fork."
+   - **Leave alone:** lines 5–10 (the fork note, even though line 7 becomes false; item 4
+     rewrites it) and every other README line.
 
 ## Deliverables
 
@@ -134,7 +161,7 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
 - `skills\read-memories\SKILL.md`, with the five `.sql` files deleted.
 - `skills\query\duckdb-compat-tests.csv` and `tools\run-compat-tests.ps1`, both deleted.
 - `tools\prove-no-snowflake.ps1`, per decisions 4 and 6.
-- `skills\snowflake-extract\SKILL.md:39`.
+- `skills\snowflake-extract\SKILL.md:39` and `skills\snowflake-extract\registry.sql:5-6`.
 - `README.md`.
 - `RESULT-1.md` at repo root.
 
@@ -146,6 +173,9 @@ Cortex log search, and `README.md:195` describes the fork's PowerShell/`.sql` de
   above:** do not edit them.
 - **Snowflake access, `allowed-tools`, `snowflake_sql_execute`:** that is item 3b.
 - **`docs\duckdb-snowflake-findings.md`:** it is a historical record. Leave it.
+- **`.claude-plugin\`, `.cortex-plugin\`:** these are item 4's. Do not delete or edit them.
+- **`checks\gl-facts.sql`:** do not edit it. Its failure today is known and outside this
+  item.
 - **`docs\tasks\`, `docs\plans\`:** archived history is never edited.
 - **Shared memory itself:** no `memory_*` calls, and no hooks.
 - **The real lake:** nothing writes to
@@ -179,26 +209,30 @@ duckdb -c ".read '<$W>/skills/query/duckdb-compat.sql'" -c "SELECT xl_date(45000
 - **First query:** prints `2023-03-15` and `DATE`.
 - **Second query:** fails with `Catalog Error` naming `iff`.
 - **Control:** the same command at `$B` succeeds on the second query, returning `1`.
+- **No macros left:** also run
+  `duckdb -csv -c ".read '<$W>/skills/query/duckdb-compat.sql'" -c "SELECT string_agg(function_name, ',' ORDER BY function_name) FROM duckdb_functions() WHERE NOT internal"`.
+  - **At `$W`:** it prints exactly `xl_date`.
+  - **At `$B`:** it prints all 17 names.
 
-**AC2 — Nothing still references the removed material.** In `$W`, search every tracked file
-**except** `docs\tasks\**`, `docs\plans\**`, `docs\duckdb-snowflake-findings.md`, `TASK.md`,
-`PLAN-5.md`, `REVIEW-*.md` and `RESULT-1.md` for each of:
-- `polyglot`
-- `run-compat-tests`
-- `duckdb-compat-tests`
-- `search.sql`
-- `message.sql`
-- `coverage.sql`
-- `sqlresults`
-- `snowflake/cortex/conversations`
-- `IFF(`
-- `NVL(`
+**AC2 — Nothing still references the removed material.** Run this from `$W` in PowerShell:
 
-**Expect 0 hits each.** Quote the search command.
+```
+git grep -n -F -e polyglot -e run-compat-tests -e duckdb-compat-tests -e search.sql -e message.sql -e coverage.sql -e sqlresults -e cortex/conversations -e 'cortex\conversations' -e 'IFF(' -e 'NVL(' -- . ':!docs/tasks' ':!docs/plans' ':!docs/duckdb-snowflake-findings.md' ':!TASK.md' ':!PLAN-5.md' ':!REVIEW-*.md' ':!RESULT-*.md'
+```
+
+- **Expect:** no output, and `$LASTEXITCODE` = 1. That is `git grep`'s "no match", **not** a
+  failure.
+- **Control:** the same command at `$B` prints hits (about 150 lines) and exits 0.
+- **Case-sensitive on purpose:** `-F` is case-sensitive, so `date_diff(` in
+  `SIDECAR.md`/`registry.sql` is not a hit.
 
 **AC3 — The compat change re-materializes, and the data is identical.**
 1. **Baseline:** from `$B`, run `materialize -LakeRoot $L`. Both contracts give
-   `REFRESHED`, `reason=no_manifest`.
+   `REFRESHED`, `reason=no_manifest`, and `CHECKS_PASSED,true`.
+   - **If the baseline fails:** if either line is `REFUSED` or `CHECKS_PASSED,false`, AC3 is
+     **NOT RUN**, because that contract fails on the live workbook, outside this item. Quote
+     the output. Never use `-Force`.
+   - **Reviewer's timing:** about 17 s.
 2. **Snapshot:** export both lake tables to Parquet files outside `$L`:
    `ATTACH 'ducklake:$L/lake.ducklake' AS lake (DATA_PATH '$L/data', READ_ONLY)`, then
    `COPY lake.<table> TO '<file>'`.
@@ -220,24 +254,20 @@ duckdb -c ".read '<$W>/skills/query/duckdb-compat.sql'" -c "SELECT xl_date(45000
 - **Same keyword, no `--here`:** at least as many rows as with `--here`, and at least one row
   whose `project` is a different folder (or, if none exists, say so and quote the per-project
   counts from a `GROUP BY project` variant).
-- **Completeness:** for the all-projects glob, `count(*)` from the skill's `read_ndjson`
-  equals the line count of those files, and the hit count for the keyword equals the count
-  from an explicit `columns={message:'JSON'}` read. If they differ, report both. Do not
-  silently pass.
+- **Description:** the frontmatter `description` contains the phrase `shared memory` and the
+  words `Claude Code`.
 
-**AC5 — The description routes to shared memory first.**
-- **The frontmatter `description`** contains the phrase `shared memory` and the words
-  `Claude Code`.
-- **The body** has no remaining mention of Cortex Code log paths. AC2 covers this.
-
-**AC6 — `prove-no-snowflake.ps1` still runs.** From `$W`, `prove-no-snowflake.ps1` with no
-`-Only`:
-- it exits 0;
-- its `SUMMARY` line shows `fail=0`;
-- there are 2 fewer entrypoints than at `$B`, because `run-compat-tests` and
-  `read-memories:search` are gone. Quote both `SUMMARY` lines.
-- If the full run is impractically slow, run it per label with `-Only` instead, and quote
-  each label's result.
+**AC5 — `prove-no-snowflake.ps1` lost exactly its two entrypoints, and nothing else
+changed.**
+- **Run:** from `$B` and from `$W`, `prove-no-snowflake.ps1` with no arguments. It takes about
+  90 s at `$B`.
+- **Quote:** both `SUMMARY` lines, and every `EXT` line's label and verdict.
+- **Expect:**
+  - `entrypoints=14` at `$B` and `entrypoints=12` at `$W`;
+  - the two missing labels are exactly `run-compat-tests` and `read-memories:search`;
+  - each of the 12 shared labels has the same verdict at `$W` as at `$B`.
+- **Exit code is not the criterion.** `gl-facts` fails at the base commit today because of the
+  live workbook. Do not fix it.
 
 ## Mutation proof — must fail, then pass again after revert
 
@@ -252,6 +282,10 @@ duckdb -c ".read '<$W>/skills/query/duckdb-compat.sql'" -c "SELECT xl_date(45000
 cd C:\Users\woodsonp\Claude\Dev\duckdb-skills; .\tools\materialize.ps1
 ```
 
-**Expect, the first time after merge:** both contracts `REFRESHED`, with `compat_sha256` among
-the reasons. This is the one-time rebuild the plan predicted. A second run reports `SKIPPED`
-for both.
+**Expect, the first time after merge:**
+- both contracts `REFRESHED`;
+- `All_Sales_Data`'s reason includes `compat_sha256`;
+- `Clayco_Job_Costs_from_GL` may show `reason=previous_checks_failed` instead. Its last real
+  run failed checks, and that reason outranks the hash comparison.
+
+Either is the one-time rebuild the plan predicted. A second run reports `SKIPPED` for both.
