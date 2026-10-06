@@ -8,10 +8,18 @@ description: >
 allowed-tools: Bash
 ---
 
-Materialize contracts into a DuckLake lakehouse (`tools\materialize.ps1`) and read
-back its status and check history (`tools\lake-status.ps1`). This is item 6:
+Materialize contracts into a DuckLake lakehouse (`${CLAUDE_PLUGIN_ROOT}/tools/materialize.ps1`) and read
+back its status and check history (`${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1`). This is item 6:
 downstream of item 5's assertion harness, which it invokes rather than
 reimplements.
+
+## Running the tools
+
+Run every script with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/tools/<script>.ps1" <args>`
+from the project folder (the tools resolve the project from the current folder).
+Quote the path; it may contain spaces. `dsk-paths.ps1` is a library, not a tool. Read
+the extract root from `list-extracts`' `extract root:` line instead of dot-sourcing it.
 
 ## Which project the tools act on
 
@@ -27,21 +35,21 @@ what it resolved; check it before trusting the answer.
 `ATTACH 'ducklake:<lakeRoot>\lake.ducklake' AS lake (DATA_PATH '<lakeRoot>\data')`
 after `LOAD ducklake;`, in a fresh `duckdb` invocation -- there is no persistent
 session between invocations in this project. `<lakeRoot>` defaults to
-`~\.duckdb-skills\<project-id>\lake` (`tools\dsk-paths.ps1`'s `Resolve-LakeRoot`);
+`~\.duckdb-skills\<project-id>\lake` (`${CLAUDE_PLUGIN_ROOT}/tools/dsk-paths.ps1`'s `Resolve-LakeRoot`);
 override with `-LakeRoot` on either tool. For a **read-only** query, add
 `READ_ONLY` to the `ATTACH` options -- confirmed this session that DuckLake
-accepts it, and it is what `tools\lake-status.ps1` uses so a status check never
+accepts it, and it is what `${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1` uses so a status check never
 creates a lake that does not yet exist. `lake.<contract_name>` holds the current
 data; `lake.manifest` and `lake.check_history` hold provenance and check results.
 Once a contract is materialized, the lake is the place to answer questions about
 that sheet, and it does not need the workbook present — see
-`tools\prove-requery.ps1`.
+`${CLAUDE_PLUGIN_ROOT}/tools/prove-requery.ps1`.
 
 ## The four-way freshness key -- and why the compat hash is in it
 
-`tools\materialize.ps1` re-decides per contract by comparing the workbook's
+`${CLAUDE_PLUGIN_ROOT}/tools/materialize.ps1` re-decides per contract by comparing the workbook's
 `LastWriteTime` and SHA-256, the contract file's SHA-256, and
-`skills\query\duckdb-compat.sql`'s SHA-256 against the newest `lake.manifest` row
+`${CLAUDE_PLUGIN_ROOT}/skills/query/duckdb-compat.sql`'s SHA-256 against the newest `lake.manifest` row
 for that contract. **All four, not three.** Both shipped contracts call
 `xl_date()`, defined in the compat file -- change its epoch or its trailing
 `::DATE` and every decoded date in the lake changes while the workbook and the
@@ -90,7 +98,7 @@ A second writer's `ATTACH` fails immediately against a held catalog with
 ...duckdb.exe (PID <n>)`, exits non-zero, and writes nothing -- confirmed this
 session with a genuine ~12s non-foldable hold (`max(hash(i*7+1)) FROM
 range(2000000000)`; `count(*) FROM range(n)` is constant-folded and produces no
-real overlap). `tools\materialize.ps1` reports this verbatim and does not retry;
+real overlap). `${CLAUDE_PLUGIN_ROOT}/tools/materialize.ps1` reports this verbatim and does not retry;
 the tuning knobs are `ducklake_max_retry_count`, `ducklake_retry_backoff`,
 `ducklake_retry_wait_ms` if retrying is ever wanted later.
 
@@ -112,15 +120,15 @@ An `-- @assert <name>: ...` line becomes `kind = floor` iff `<name>` ends
 unsuffixed floor is filed as an invariant -- the suffix is the only
 machine-readable signal there is. `check_history.observed` for an `@assert` row
 is the emitted PASS/FAIL/ERROR verdict itself, never the underlying ratio/date/
-sum: the harness (`tools\run-assertions.ps1`) never emits that value (item 4's
+sum: the harness (`${CLAUDE_PLUGIN_ROOT}/tools/run-assertions.ps1`) never emits that value (item 4's
 Decision 1 keeps only the verdict), and this tool never recomputes an
 assertion's expression to recover it -- a second evaluation would be a second
-source of truth. `tools\lake-status.ps1 -History <contract>` prints an explicit
+source of truth. `${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1 -History <contract>` prints an explicit
 note on every such row for this reason.
 
 ## Joining a lake table to a Snowflake extract
 
-`tools\cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
+`${CLAUDE_PLUGIN_ROOT}/tools/cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
 in a single SQL statement, printing the age of both inputs beside the answer -- see the README's
 "Joining a Snowflake extract to a workbook sheet" section for the walkthrough and the freshness rule.
 

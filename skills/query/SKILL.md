@@ -13,6 +13,14 @@ Input: `$@`
 
 Follow these steps in order.
 
+## Running the tools
+
+Run every script with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/tools/<script>.ps1" <args>`
+from the project folder (the tools resolve the project from the current folder).
+Quote the path; it may contain spaces. `dsk-paths.ps1` is a library, not a tool. Read
+the extract root from `list-extracts`' `extract root:` line instead of dot-sourcing it.
+
 ## Step 1 — Resolve state and determine the mode
 
 Look for an existing state file in either location:
@@ -158,7 +166,7 @@ For natural language questions, also provide a brief interpretation of the resul
 ## Snowflake dialect compatibility
 
 Write plain DuckDB SQL with the macros loaded (they arrive via `state.sql`, never a second
-`-init` — see `tools\ensure-duckdb-compat.ps1`). Reach for
+`-init` — see `${CLAUDE_PLUGIN_ROOT}/tools/ensure-duckdb-compat.ps1`). Reach for
 `polyglot_query('<sql>', 'snowflake')` when a construct fails with a `Catalog Error`, or when
 lifting SQL verbatim from Snowflake. Single quotes inside the wrapped string must be doubled,
 and `LOAD polyglot;` is required first — it does not autoload. `LOAD polyglot;` must come
@@ -187,7 +195,7 @@ Always surface `polyglot_transpile('<sql>', 'snowflake')` output when polyglot r
 function, not a table function — because the transpiled SQL is the only way to see a bypass like the
 above, and it is part of the answer, not debug detail.
 
-See `skills/query/duckdb-compat.md` for the full macro inventory, the before/after fixture
+See `${CLAUDE_PLUGIN_ROOT}/skills/query/duckdb-compat.md` for the full macro inventory, the before/after fixture
 table, and the current residual list.
 
 ---

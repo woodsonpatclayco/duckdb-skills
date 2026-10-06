@@ -11,8 +11,16 @@ allowed-tools: Bash, snowflake_sql_execute
 Materialize a named Snowflake query to `~\.duckdb-skills\<project-id>\extracts\<name>\`,
 publish it with a sidecar (`skills/snowflake-extract/SIDECAR.md`), and re-pull it
 silently when a freshness check says stale. Every decision and every filesystem
-mutation is a script (`tools\extract-decide.ps1`, `tools\publish-extract.ps1`); the
+mutation is a script (`${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1`, `${CLAUDE_PLUGIN_ROOT}/tools/publish-extract.ps1`); the
 agent only moves bytes and feeds values in.
+
+## Running the tools
+
+Run every script with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/tools/<script>.ps1" <args>`
+from the project folder (the tools resolve the project from the current folder).
+Quote the path; it may contain spaces. `dsk-paths.ps1` is a library, not a tool. Read
+the extract root from `list-extracts`' `extract root:` line instead of dot-sourcing it.
 
 ## Which project the tools act on
 
@@ -25,15 +33,15 @@ exit 2. Read-only tools never create folders -- only `materialize` and
 what it resolved; check it before trusting the answer.
 ## Registry first -- check before querying Snowflake
 
-Before running any query against Snowflake, run `tools\list-extracts.ps1` to see
+Before running any query against Snowflake, run `${CLAUDE_PLUGIN_ROOT}/tools/list-extracts.ps1` to see
 whether a named extract already covers the need. This is documentation, not an
 enforceable check -- skills are stateless shell invocations and nothing compels a
 future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
 
 ## Materialize (first time, or `-Name` not yet registered)
 
-1. Resolve the extract root: dot-source `tools\dsk-paths.ps1` or read
-   `tools\list-extracts.ps1`'s `extract root:` header. **Create `<root>` if it is
+1. Resolve the extract root: read
+   `${CLAUDE_PLUGIN_ROOT}/tools/list-extracts.ps1`'s `extract root:` header. **Create `<root>` if it is
    missing (read-only tools no longer create it), then `<root>\<name>.new\`
    before `GET`** -- `GET` fails `ENOENT` against a directory that does not exist yet.
 2. For each source object: `SHOW TABLES LIKE '<object>'` for `rows` and `bytes`
@@ -86,7 +94,7 @@ future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
 7. Look up `TOTAL_ELAPSED_TIME` for that `COPY INTO` via
    `<db>.INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION()`, `EXECUTION_STATUS = 'SUCCESS'`
    only, -> `runtime_seconds`. If unobtainable, omit the field and say so.
-8. `tools\publish-extract.ps1 -Name <name> -StagingDir <root>\<name>.new
+8. `${CLAUDE_PLUGIN_ROOT}/tools/publish-extract.ps1 -Name <name> -StagingDir <root>\<name>.new
    -SidecarPath <path to the JSON built from steps 2-7> -ExtractRoot <root>`. It
    stamps `sidecar_version`/`materialized_at`/`window_minutes`/`expires_at` itself --
    do not include them. The sidecar's `query` records step 4's determined query
@@ -96,17 +104,17 @@ future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
 
 ## Read (an extract already exists)
 
-Call `tools\extract-decide.ps1 -Name <name>` with **no current values**.
+Call `${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1 -Name <name>` with **no current values**.
 
 - `FRESH` -- stop. No Snowflake call.
 - `STALE (probe required) age=<n> window=<w> objects=<list>` -- probe each printed
   object in order (`SHOW TABLES` rows + `LAST_ALTERED`), then call
-  `tools\extract-decide.ps1` again with `-CurrentRows`/`-CurrentLastAltered`
+  `${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1` again with `-CurrentRows`/`-CurrentLastAltered`
   positional against that same object list. For more than one object,
   `powershell -File` cannot bind separate values to an array parameter, so pass
   a single comma-joined string per parameter instead of two bare tokens. Worked
   example, two objects probed as `objects=DB.SCH.A,DB.SCH.B` with rows 100 and
-  205: `tools\extract-decide.ps1 -Name <name> -CurrentRows 100,205
+  205: `${CLAUDE_PLUGIN_ROOT}/tools/extract-decide.ps1 -Name <name> -CurrentRows 100,205
   -CurrentLastAltered "<a-timestamp>,<b-timestamp>"` -- each value lands
   positionally against the object printed in that same order.
 - Any `REFRESH (...)`, including `REFRESH (no evidence past ceiling)` --
@@ -140,7 +148,7 @@ stage. `publish-extract.ps1`'s rename-aside sequence settles the local side.
 
 ## Joining an extract to a lake table
 
-`tools\cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
+`${CLAUDE_PLUGIN_ROOT}/tools/cross-query.ps1` (item 8) answers one question across a lake table and a Snowflake extract
 in a single SQL statement, printing the age of both inputs beside the answer -- see the README's
 "Joining a Snowflake extract to a workbook sheet" section for the walkthrough and the freshness rule.
 
