@@ -13,6 +13,15 @@ back its status and check history (`tools\lake-status.ps1`). This is item 6:
 downstream of item 5's assertion harness, which it invokes rather than
 reimplements.
 
+## Which project the tools act on
+
+These tools run **inside the project's git repo** (the project is the git root of the
+current folder -- there is no current-folder fallback), or with explicit roots
+(`-LakeRoot` / `-ExtractRoot`; `materialize` also needs `-Contract` outside a repo).
+Outside a repo without them they print `ERROR: not inside a git repository: ...` and
+exit 2. Read-only tools never create folders -- only `materialize` and
+`publish-extract` do. Every tool writes `project: <id> (<root>)` to **stderr**, naming
+what it resolved; check it before trusting the answer.
 ## Querying the lake directly
 
 `ATTACH 'ducklake:<lakeRoot>\lake.ducklake' AS lake (DATA_PATH '<lakeRoot>\data')`

@@ -2,7 +2,8 @@
 tools\run-assertions.ps1 [-Contract <path>]
 
 Multi-contract assertion harness (TASK.md item 5). No argument: discovers and runs
-every *.sql directly under contracts\ (fixture contracts built by
+every *.sql directly under <project root>\contracts (the git root of the current
+folder; outside a git repo -Contract is required, else exit 2) (fixture contracts built by
 make-truncation-fixtures.ps1 live in $env:TEMP, so they are never picked up here).
 With -Contract: runs exactly one file, and accepts a path OUTSIDE contracts\ so a
 fixture can be checked without becoming a discoverable "third contract".
@@ -136,8 +137,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$contractsDir = Join-Path $repoRoot 'contracts'
+. (Join-Path $PSScriptRoot 'dsk-paths.ps1')
+
+# Project resolution (item 1): contracts\ is <project root>\contracts, found from the git
+# root of the current folder -- no fallback. Outside a git repo -Contract is required.
+try {
+    if ($Contract) {
+        $projectRoot = Get-ProjectRootOrNull
+    } else {
+        $projectRoot = Get-ProjectRoot -Hint '-Contract'
+    }
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
+}
+Write-ProjectNote
+$contractsDir = if ($projectRoot) { Join-Path $projectRoot 'contracts' } else { $null }
 $checkContractPath = Join-Path $PSScriptRoot 'check-contract.ps1'
 $compatFullPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\skills\query\duckdb-compat.sql'))
 $compatFwd = $compatFullPath -replace '\\', '/'

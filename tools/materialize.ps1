@@ -4,8 +4,10 @@ tools\materialize.ps1 [-Contract <path>] [-Force] [-LakeRoot <absolute path>]
 TASK.md item 6: materializes contracts into a DuckLake lakehouse, with a four-way
 freshness key and a check history. Default: every contract in contracts\. Lake at
 ~\.duckdb-skills\<project-id>\lake\lake.ducklake, DATA_PATH at ...\lake\data
-alongside it -- resolved via tools\dsk-paths.ps1's Resolve-LakeRoot, same shape and
-same absolute-path rejection as Resolve-ExtractRoot.
+alongside it -- resolved via tools\dsk-paths.ps1's Resolve-LakeRoot -Create, same shape and
+same absolute-path rejection as Resolve-ExtractRoot. Item 1: the project is the git
+root of the current folder (no fallback); contracts\ is <project root>\contracts;
+outside a git repo it refuses (exit 2) unless BOTH -LakeRoot and -Contract are given.
 
 Per contract: decide (four-way freshness: workbook mtime, workbook SHA-256, contract
 SHA-256, compat SHA-256, plus a target-still-exists check that overrides a clean
@@ -116,8 +118,21 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'dsk-paths.ps1')
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$contractsDir = Join-Path $repoRoot 'contracts'
+# Project resolution (item 1): refuse BEFORE any resolver runs with -Create. Outside a
+# git repo this tool needs both -LakeRoot and -Contract; inside, the contracts folder
+# is <project root>\contracts.
+try {
+    if ($Contract -and $LakeRoot) {
+        $projectRoot = Get-ProjectRootOrNull
+    } else {
+        $projectRoot = Get-ProjectRoot -Hint '-LakeRoot and -Contract'
+    }
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
+}
+Write-ProjectNote
+$contractsDir = if ($projectRoot) { Join-Path $projectRoot 'contracts' } else { $null }
 $runAssertionsPath = Join-Path $PSScriptRoot 'run-assertions.ps1'
 $compatFullPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\skills\query\duckdb-compat.sql'))
 $compatFwd = $compatFullPath -replace '\\', '/'
@@ -132,7 +147,7 @@ if (-not (Test-Path -LiteralPath $compatFullPath -PathType Leaf)) {
     exit 1
 }
 
-$lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot
+$lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot -Create
 $lakeCatalogFile = Join-Path $lakeRootResolved 'lake.ducklake'
 $lakeDataDir = Join-Path $lakeRootResolved 'data'
 if (-not (Test-Path -LiteralPath $lakeDataDir -PathType Container)) {
@@ -157,6 +172,7 @@ if ($Contract) {
         Write-Output "ERROR: contracts directory not found: $contractsDir"
         exit 1
     }
+    [Console]::Error.WriteLine("contracts: $contractsDir")
     $contractFiles = @(
         Get-ChildItem -LiteralPath $contractsDir -Filter '*.sql' -File |
             Sort-Object Name |

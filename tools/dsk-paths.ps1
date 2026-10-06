@@ -15,7 +15,7 @@ Get-ProjectId: git rev-parse --show-toplevel if inside a work tree, else the
 current directory; resolved to a full path; lowercased; trailing separator
 removed; then every \ and / replaced by - and every : deleted.
 
-Resolve-ExtractRoot returns a (string, bool) TUPLE -- (<resolved root>, <used
+Resolve-ExtractRoot [-Create] [-Hint] returns a (string, bool) TUPLE -- (<resolved root>, <used
 default>). extract-status.ps1's original copy returned a bare string;
 list-extracts.ps1's returned the tuple, whose bool gates the "project-id:" /
 "extract root:" header lines 2a's AC1 asserts. This shared version keeps the
@@ -36,52 +36,81 @@ repo itself (the repo's own .duckdb-skills\ stays reserved for
 ensure-duckdb-compat.ps1's state.sql). Returns a (string, bool) tuple: the
 resolved lake root directory, and whether the default was used. Callers derive
 the catalog file as "$root\lake.ducklake" and DATA_PATH as "$root\data"
-themselves -- this function only resolves and creates the root directory.
+themselves -- this function only resolves the root directory (and creates it with -Create).
 #>
 
-function Get-ProjectId {
+function Get-ProjectRootOrNull {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $gitRoot = $null
     try { $gitRoot = & git rev-parse --show-toplevel 2>$null } catch { $gitRoot = $null }
-    if ($LASTEXITCODE -eq 0 -and $gitRoot) {
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -eq 0 -and $gitRoot) {
         $root = ($gitRoot | Select-Object -First 1) -replace '/', '\'
-    } else {
-        $root = (Get-Location).Path
+        return [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/')
     }
-    $full = [System.IO.Path]::GetFullPath($root).TrimEnd('\', '/')
+    return $null
+}
+
+function Get-ProjectRoot([string]$Hint = 'the explicit root options this tool accepts') {
+    $root = Get-ProjectRootOrNull
+    if (-not $root) {
+        throw "ERROR: not inside a git repository: $((Get-Location).Path). Run from your project folder, or pass $Hint."
+    }
+    return $root
+}
+
+function Get-ProjectId([string]$Hint = 'the explicit root options this tool accepts') {
+    $full = Get-ProjectRoot -Hint $Hint
     $lower = $full.ToLowerInvariant()
     $id = ($lower -replace '[\\/]', '-') -replace ':', ''
     return $id
 }
 
-function Resolve-ExtractRoot([string]$ExplicitRoot) {
+function Write-ProjectNote {
+    $root = Get-ProjectRootOrNull
+    if ($root) {
+        $id = (($root.ToLowerInvariant() -replace '[\\/]', '-') -replace ':', '')
+        [Console]::Error.WriteLine("project: $id ($root)")
+    } else {
+        [Console]::Error.WriteLine('project: none (explicit roots)')
+    }
+}
+
+function Resolve-ExtractRoot([string]$ExplicitRoot, [switch]$Create, [string]$Hint = '-ExtractRoot') {
     if ($ExplicitRoot) {
         if (-not [System.IO.Path]::IsPathRooted($ExplicitRoot)) {
             throw '-ExtractRoot must be an absolute path'
         }
-        return [System.IO.Path]::GetFullPath($ExplicitRoot), $false
+        $resolved = [System.IO.Path]::GetFullPath($ExplicitRoot)
+        if ($Create -and -not (Test-Path -LiteralPath $resolved -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $resolved | Out-Null
+        }
+        return $resolved, $false
     }
-    $projectId = Get-ProjectId
+    $projectId = Get-ProjectId -Hint $Hint
     $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\extracts"))
-    if (-not (Test-Path -LiteralPath $default -PathType Container)) {
+    if ($Create -and -not (Test-Path -LiteralPath $default -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $default | Out-Null
     }
     return $default, $true
 }
 
-function Resolve-LakeRoot([string]$ExplicitRoot) {
+function Resolve-LakeRoot([string]$ExplicitRoot, [switch]$Create, [string]$Hint = '-LakeRoot') {
     if ($ExplicitRoot) {
         if (-not [System.IO.Path]::IsPathRooted($ExplicitRoot)) {
             throw '-LakeRoot must be an absolute path'
         }
         $resolved = [System.IO.Path]::GetFullPath($ExplicitRoot)
-        if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        if ($Create -and -not (Test-Path -LiteralPath $resolved -PathType Container)) {
             New-Item -ItemType Directory -Force -Path $resolved | Out-Null
         }
         return $resolved, $false
     }
-    $projectId = Get-ProjectId
+    $projectId = Get-ProjectId -Hint $Hint
     $default = [System.IO.Path]::GetFullPath((Join-Path $HOME ".duckdb-skills\$projectId\lake"))
-    if (-not (Test-Path -LiteralPath $default -PathType Container)) {
+    if ($Create -and -not (Test-Path -LiteralPath $default -PathType Container)) {
         New-Item -ItemType Directory -Force -Path $default | Out-Null
     }
     return $default, $true

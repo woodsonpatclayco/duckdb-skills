@@ -58,7 +58,13 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'dsk-paths.ps1')
 
-$lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot
+try {
+    $lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot -Hint '-LakeRoot'
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
+}
+Write-ProjectNote
 $lakeCatalogFile = Join-Path $lakeRootResolved 'lake.ducklake'
 $lakeDataDir = Join-Path $lakeRootResolved 'data'
 $lakeCatalogFwd = $lakeCatalogFile -replace '\\', '/'

@@ -14,6 +14,15 @@ silently when a freshness check says stale. Every decision and every filesystem
 mutation is a script (`tools\extract-decide.ps1`, `tools\publish-extract.ps1`); the
 agent only moves bytes and feeds values in.
 
+## Which project the tools act on
+
+These tools run **inside the project's git repo** (the project is the git root of the
+current folder -- there is no current-folder fallback), or with explicit roots
+(`-LakeRoot` / `-ExtractRoot`; `materialize` also needs `-Contract` outside a repo).
+Outside a repo without them they print `ERROR: not inside a git repository: ...` and
+exit 2. Read-only tools never create folders -- only `materialize` and
+`publish-extract` do. Every tool writes `project: <id> (<root>)` to **stderr**, naming
+what it resolved; check it before trusting the answer.
 ## Registry first -- check before querying Snowflake
 
 Before running any query against Snowflake, run `tools\list-extracts.ps1` to see
@@ -24,7 +33,8 @@ future session to look first (precedent: `skills/read-memories/SKILL.md:15-18`).
 ## Materialize (first time, or `-Name` not yet registered)
 
 1. Resolve the extract root: dot-source `tools\dsk-paths.ps1` or read
-   `tools\list-extracts.ps1`'s `extract root:` header. **Create `<root>\<name>.new\`
+   `tools\list-extracts.ps1`'s `extract root:` header. **Create `<root>` if it is
+   missing (read-only tools no longer create it), then `<root>\<name>.new\`
    before `GET`** -- `GET` fails `ENOENT` against a directory that does not exist yet.
 2. For each source object: `SHOW TABLES LIKE '<object>'` for `rows` and `bytes`
    (`source_rows`, `source_bytes`), and
