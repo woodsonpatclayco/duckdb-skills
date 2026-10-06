@@ -2,28 +2,28 @@
 
 A [Claude Code](https://claude.ai/code) plugin that adds DuckDB-powered skills for data exploration and session memory.
 
-> **This is a fork adapted for [Cortex Code](https://docs.snowflake.com/en/user-guide/cortex-code/cortex-code).**
-> Upstream is [duckdb/duckdb-skills](https://github.com/duckdb/duckdb-skills). Only `read-memories`
-> differs: it searches Cortex Code session logs instead of Claude Code ones, and is written for
-> Windows / PowerShell. The other eight skills are unmodified from upstream and the sections below
-> describe them as upstream does — including the Claude Code install and local-development steps,
-> which do not apply to a Cortex Code install (plugins live in `~/.snowflake/cortex/plugins/`).
+> **A Claude-Code-first fork of [duckdb/duckdb-skills](https://github.com/duckdb/duckdb-skills), used on Windows.**
+> It adds the `lakehouse` skill (contracts materialized into DuckLake) and the `snowflake-extract`
+> skill (Snowflake extracts through the Python connector, `tools\sf.py`). It also adapts
+> `read-memories` for Windows, keeps only `xl_date()` in the compat file, and resolves the project
+> by git root (tools refuse outside a git repo). Cortex Code is not a target of this fork.
 
 ## Installation
 
-### From the Discover tab (coming soon)
+### From GitHub
 
-We are working on submitting this plugin to the official Anthropic marketplace. Once listed, it will appear in the **Discover** tab when you run `/plugin` inside Claude Code.
-
-### From GitHub (available now)
-
-Add the repository as a plugin source and install:
+Add the fork as a plugin source and install:
 
 ```
-/plugin marketplace add duckdb/duckdb-skills
+/plugin marketplace add woodsonpatclayco/duckdb-skills
+/plugin install duckdb-skills@woodsonp-duckdb-skills
 ```
+
+The same from a shell:
+
 ```
-/plugin install duckdb-skills@duckdb-skills
+claude plugin marketplace add woodsonpatclayco/duckdb-skills
+claude plugin install duckdb-skills@woodsonp-duckdb-skills
 ```
 
 This registers the GitHub repo as a marketplace and installs the plugin. Skills will be available as `/duckdb-skills:<skill-name>` in all future sessions.
@@ -33,9 +33,18 @@ This registers the GitHub repo as a marketplace and installs the plugin. Skills 
 To pull the latest version, update the marketplace first and then the plugin:
 
 ```
-/plugin marketplace update duckdb-skills
-/plugin update duckdb-skills@duckdb-skills
+/plugin marketplace update woodsonp-duckdb-skills
+/plugin update duckdb-skills@woodsonp-duckdb-skills
 ```
+
+The same from a shell:
+
+```
+claude plugin marketplace update woodsonp-duckdb-skills
+claude plugin update duckdb-skills@woodsonp-duckdb-skills
+```
+
+A change reaches an installed copy only when `version` in `.claude-plugin\plugin.json` and `marketplace.json` is bumped.
 
 ## Skills
 
@@ -91,6 +100,20 @@ Install or update DuckDB extensions. Supports `name@repo` syntax for community e
 /duckdb-skills:install-duckdb spatial httpfs
 /duckdb-skills:install-duckdb gcs@community
 /duckdb-skills:install-duckdb --update
+```
+
+### `lakehouse`
+Materialize Excel contracts into a DuckLake lake, then check its status and check history. Freshness is reported per table; nothing is refreshed on your behalf.
+
+```
+/duckdb-skills:lakehouse what's the lake status?
+```
+
+### `snowflake-extract`
+Pull a named Snowflake query to local Parquet through the Python connector. A freshness registry records baselines, so reads re-pull only when the source has changed.
+
+```
+/duckdb-skills:snowflake-extract is the dt_projects extract fresh?
 ```
 
 ## Session state
@@ -161,7 +184,7 @@ To test skills locally from a clone of this repo:
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/duckdb/duckdb-skills.git
+git clone https://github.com/woodsonpatclayco/duckdb-skills.git
 cd duckdb-skills
 
 # 2. Launch Claude Code with the local plugin directory
@@ -196,8 +219,6 @@ These skills have been tested upstream on **macOS** and **Linux**. Windows is no
 
 ## Reporting issues & suggestions
 
-Found a bug or have an idea for improvement? Open an issue at:
-
-**https://github.com/duckdb/duckdb-skills/issues**
+The fork has GitHub Issues disabled. Report problems to the fork's owner; upstream DuckDB bugs go to https://github.com/duckdb/duckdb-skills/issues.
 
 For DuckDB-specific bugs (extension loading, SQL errors), please include the DuckDB version (`duckdb --version`) and the full error message.
