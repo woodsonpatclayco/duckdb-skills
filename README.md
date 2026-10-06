@@ -4,9 +4,9 @@ A [Claude Code](https://claude.ai/code) plugin that adds DuckDB-powered skills f
 
 > **A Claude-Code-first fork of [duckdb/duckdb-skills](https://github.com/duckdb/duckdb-skills), used on Windows.**
 > It adds the `lakehouse` skill (contracts materialized into DuckLake) and the `snowflake-extract`
-> skill (Snowflake extracts through the Python connector, `tools\sf.py`). It changes a
-> Windows-adapted `read-memories`, `xl_date()` in the compat file, and project resolution by git
-> root (tools refuse outside a git repo). Cortex Code is not a target of this fork.
+> skill (Snowflake extracts through the Python connector, `tools\sf.py`). It also adapts
+> `read-memories` for Windows, keeps only `xl_date()` in the compat file, and resolves the project
+> by git root (tools refuse outside a git repo). Cortex Code is not a target of this fork.
 
 ## Installation
 
@@ -113,7 +113,7 @@ Materialize Excel contracts into a DuckLake lake, then check its status and chec
 Pull a named Snowflake query to local Parquet through the Python connector. A freshness registry records baselines, so reads re-pull only when the source has changed.
 
 ```
-/duckdb-skills:snowflake-extract pull the job costs extract
+/duckdb-skills:snowflake-extract is the dt_projects extract fresh?
 ```
 
 ## Session state
