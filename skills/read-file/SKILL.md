@@ -13,14 +13,22 @@ You are helping the user read and analyze a data file using DuckDB.
 Filename given: `$0`
 Question: `${1:-describe the data}`
 
+## Running the tools
+
+Run every script with
+`powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/tools/<script>.ps1" <args>`
+from the project folder (the tools resolve the project from the current folder).
+Quote the path; it may contain spaces. `dsk-paths.ps1` is a library, not a tool. Read
+the extract root from `list-extracts`' `extract root:` line instead of dot-sourcing it.
+
 ## Excel workbooks
 
 **If a contract covers the workbook and sheet, answer from the lake, not the
 workbook.** Contracts are `contracts\*.sql`; each names its workbook in
 `read_xlsx('<path>', sheet='<sheet>', …)`. Query `lake.<contract>` per the
-`lakehouse` skill, and check freshness with `tools\lake-status.ps1`.
+`lakehouse` skill, and check freshness with `${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1`.
 
-**If none does:** list sheets with `tools\list-sheets.ps1 <absolute path>` (the
+**If none does:** list sheets with `${CLAUDE_PLUGIN_ROOT}/tools/list-sheets.ps1 <absolute path>` (the
 first sheet may be metadata — `Data Extracts.xlsm`'s is a 2-row `MetaData`);
 read the named sheet with `sheet=`, `all_varchar = true` and
 `stop_at_empty = false`; cast money explicitly to `DECIMAL` before summing; and

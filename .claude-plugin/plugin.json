@@ -1,13 +1,13 @@
 {
   "name": "duckdb-skills",
-  "description": "DuckDB-powered skills for Claude Code: read any data file, attach and query DuckDB databases, search DuckDB/DuckLake docs, search past session logs, and install/update DuckDB extensions.",
+  "description": "Skills for Claude Code that use DuckDB: a lakehouse of Excel contracts materialized as DuckLake, Snowflake extracts kept as local Parquet, Excel contract checks, querying DuckDB databases and files, and reading any data file.",
   "version": "0.2.4",
   "author": {
-    "name": "duckdb",
-    "url": "https://github.com/duckdb"
+    "name": "woodsonpatclayco",
+    "url": "https://github.com/woodsonpatclayco"
   },
-  "repository": "https://github.com/duckdb/duckdb-skills",
-  "homepage": "https://duckdb.org",
+  "repository": "https://github.com/woodsonpatclayco/duckdb-skills",
+  "homepage": "https://github.com/woodsonpatclayco/duckdb-skills",
   "license": "MIT",
   "keywords": ["duckdb", "ducklake", "parquet", "csv", "json", "avro", "excel", "iceberg", "delta", "read-file", "read-memories", "duckdb-docs", "data-exploration", "session-logs", "query", "sql", "attach-db"]
 }
