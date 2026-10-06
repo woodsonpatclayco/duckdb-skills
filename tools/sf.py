@@ -105,7 +105,8 @@ def do_unload(args):
 
             os.makedirs(dest, exist_ok=True)
             cur.execute("GET %s 'file://%s/'" % (stage, dest.replace("\\", "/").rstrip("/")))
-            files = [row_dict(cur, g).get("file") for g in cur.fetchall()]
+            files = [os.path.basename(row_dict(cur, g).get("file") or "")
+                     for g in cur.fetchall()]
 
             runtime = None
             for attempt in range(5):
