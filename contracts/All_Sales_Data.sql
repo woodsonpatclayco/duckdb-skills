@@ -134,7 +134,12 @@ FROM (
 --   are absolute figures that can legitimately move (a new year arrives, more sales
 --   close) and none of them has a defensible floor value handed down for this round.
 -- @assert startdate_is_date: (SELECT any_value(typeof("Start Date")) FROM contract_view) = 'DATE'
--- @assert matchproject_ratio_floor: (SELECT count("match project")::DOUBLE / count(*) FROM contract_view) >= 0.90
+-- matchproject_ratio_floor is scoped to won jobs (2026-10-06). Business rule (Phil): a
+-- match project is expected once a job is Sold, Awarded or Verbal Awarded; prospects may
+-- have none. Unscoped, the ratio followed the prospect mix: the sheet grew from sales
+-- years 2023-2026 to 2023-2031 (484 rows, mostly out-year prospects) and fell to 0.733.
+-- Won jobs measured 255 of 260 = 0.981 on 2026-10-06.
+-- @assert matchproject_ratio_floor: (SELECT count("match project")::DOUBLE / count(*) FROM contract_view WHERE "Status_Description" IN ('Sold', 'Awarded', 'Verbal Awarded')) >= 0.90
 -- @assert revtotal_ratio_floor: (SELECT count("Revenue Total")::DOUBLE / count(*) FROM contract_view) >= 0.85
 -- @assert enddate_ratio_floor: (SELECT count("End Date")::DOUBLE / count(*) FROM contract_view) >= 0.55
 -- @assert revtotal_sum_exact_decimal: (SELECT typeof(sum("Revenue Total")) FROM contract_view) LIKE 'DECIMAL%'
@@ -142,28 +147,28 @@ FROM (
 -- @assert revtotal_maxcast_exact_decimal: (SELECT typeof(max("Revenue Total")) FROM contract_view) LIKE 'DECIMAL%'
 
 -- Snapshots (round 2, C2): reported unconditionally, gate nothing. Committed values
--- below are this session's own baseline (2026-09-25) -- zero drift observed against
--- the 2026-09-24 figures this contract originally shipped with. A mismatch on a
+-- below are this session's own baseline, re-pinned 2026-10-06 after the sheet grew from sales years
+-- 2023-2026 to 2023-2031 (the 2026-09-25 values are in git history). A mismatch on a
 -- future run is drift to observe via SNAPSHOT_DRIFT, not a failure.
 -- @snapshot matchproject_nn: (SELECT count("match project") FROM contract_view)
--- @snapshot_committed matchproject_nn: 214
+-- @snapshot_committed matchproject_nn: 355
 -- @snapshot revtotal_nn: (SELECT count("Revenue Total") FROM contract_view)
--- @snapshot_committed revtotal_nn: 201
+-- @snapshot_committed revtotal_nn: 450
 -- @snapshot earntotal_nn: (SELECT count("Earnings Total") FROM contract_view)
--- @snapshot_committed earntotal_nn: 201
+-- @snapshot_committed earntotal_nn: 445
 -- @snapshot startdate_nn: (SELECT count("Start Date") FROM contract_view)
--- @snapshot_committed startdate_nn: 150
+-- @snapshot_committed startdate_nn: 389
 -- @snapshot enddate_nn: (SELECT count("End Date") FROM contract_view)
--- @snapshot_committed enddate_nn: 145
+-- @snapshot_committed enddate_nn: 377
 -- @snapshot revtotal_sum: (SELECT sum("Revenue Total") FROM contract_view)
--- @snapshot_committed revtotal_sum: 36580445574.84
+-- @snapshot_committed revtotal_sum: 161153405523.86
 -- @snapshot earntotal_sum: (SELECT sum("Earnings Total") FROM contract_view)
--- @snapshot_committed earntotal_sum: 1439728975.91
+-- @snapshot_committed earntotal_sum: 6259655667.82
 -- @snapshot revtotal_max: (SELECT max("Revenue Total") FROM contract_view)
--- @snapshot_committed revtotal_max: 1682000000.00
+-- @snapshot_committed revtotal_max: 7000000000.00
 -- @snapshot startdate_min: (SELECT min("Start Date") FROM contract_view)
 -- @snapshot_committed startdate_min: 2023-07-15
 -- @snapshot startdate_max: (SELECT max("Start Date") FROM contract_view)
--- @snapshot_committed startdate_max: 2027-03-15
+-- @snapshot_committed startdate_max: 2031-10-01
 -- @snapshot salesyear_distinct: (SELECT count(DISTINCT "Sales Year") FROM contract_view)
--- @snapshot_committed salesyear_distinct: 4
+-- @snapshot_committed salesyear_distinct: 9

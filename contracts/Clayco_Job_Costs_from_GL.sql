@@ -115,8 +115,11 @@ FROM (
 --     - vendorname_ratio_floor (below, new) replaces vendorname_nn: >= 0.80 -- observed
 --       0.83607 (2026-09-24) and 0.83620 (2026-09-25), stable across a refresh that
 --       moved every absolute count.
---     - glperiod_ratio_floor (below, new) replaces glperiod_nn: >= 0.25 -- observed
---       0.30211 and 0.30345 across the same refresh.
+--     - glperiod_ratio_floor was REMOVED 2026-10-06. It was a >= 0.25 floor set from two
+--       late-September readings (0.30211, 0.30345), but the ratio follows the calendar:
+--       GL_PERIOD is only populated for the three most recent months, so early in a
+--       month ("Current Month" = 606 rows) it fell to 0.2279 with nothing wrong. It is
+--       replaced by the INVARIANT glperiod_null_iff_older below.
 --     - the existing @rows_floor: 50000 directive above, unchanged.
 --
 --   SNAPSHOT (reported as a SNAPSHOT,<name>,<value> context line, never gating the
@@ -142,27 +145,31 @@ FROM (
 -- gates the exit code.
 -- @assert jobcosts_sum_exact_decimal: (SELECT typeof(sum(JOB_COSTS)) FROM contract_view) LIKE 'DECIMAL%'
 -- @assert vendorname_ratio_floor: (SELECT count(VENDOR_NAME)::DOUBLE / count(*) FROM contract_view) >= 0.80
--- @assert glperiod_ratio_floor: (SELECT count(GL_PERIOD)::DOUBLE / count(*) FROM contract_view) >= 0.25
+-- Business rule (Phil, 2026-10-06): GL_PERIOD is blank exactly for "3 Months and
+-- Older" rows (MONTH_OFFSET = -99) and filled for every other row. Measured 2026-10-06:
+-- 44,610 blank, all -99; 13,167 filled, all 0/-1/-2. IS DISTINCT FROM makes a NULL
+-- MONTH_OFFSET count as a violation rather than slip through.
+-- @assert glperiod_null_iff_older: (SELECT count(*) FROM contract_view WHERE (GL_PERIOD IS NULL) IS DISTINCT FROM (MONTH_OFFSET = '-99')) = 0
 
 -- GL_PERIOD type. any_value() is required: an un-aggregated typeof() would return one
 -- row per record and trip the one-row assertion rule.
 -- @assert glperiod_is_date: (SELECT any_value(typeof(GL_PERIOD)) FROM contract_view) = 'DATE'
 
 -- Snapshots (round 2, C2): reported unconditionally, gate nothing. Committed values
--- below are this session's own baseline (2026-09-25, workbook hash
--- A9CFF71AC5CBC83CB792676CB12AB317FEAE9BDFCB734BD11F208FFB29BA33E3) -- a mismatch on a
+-- below are this session's own baseline (re-pinned 2026-10-06, workbook hash
+-- 459F7F28219BE3F9A88AC98FF3C622E832D7A3251E65770C42B3B424BBDC8B30) -- a mismatch on a
 -- future run is drift to observe via SNAPSHOT_DRIFT, not a failure.
 -- @snapshot rows: (SELECT count(*) FROM contract_view)
--- @snapshot_committed rows: 62230
+-- @snapshot_committed rows: 57777
 -- @snapshot jobcosts_nn: (SELECT count(JOB_COSTS) FROM contract_view)
--- @snapshot_committed jobcosts_nn: 62230
+-- @snapshot_committed jobcosts_nn: 57777
 -- @snapshot vendorname_nn: (SELECT count(VENDOR_NAME) FROM contract_view)
--- @snapshot_committed vendorname_nn: 52037
+-- @snapshot_committed vendorname_nn: 48527
 -- @snapshot glperiod_nn: (SELECT count(GL_PERIOD) FROM contract_view)
--- @snapshot_committed glperiod_nn: 18884
+-- @snapshot_committed glperiod_nn: 13167
 -- @snapshot jobcosts_sum: (SELECT sum(JOB_COSTS) FROM contract_view)
--- @snapshot_committed jobcosts_sum: 22478661033.93
+-- @snapshot_committed jobcosts_sum: 22703472406.68
 -- @snapshot glperiod_min: (SELECT min(GL_PERIOD) FROM contract_view)
--- @snapshot_committed glperiod_min: 2026-07-01
+-- @snapshot_committed glperiod_min: 2026-08-01
 -- @snapshot glperiod_max: (SELECT max(GL_PERIOD) FROM contract_view)
 -- @snapshot_committed glperiod_max: 2026-10-01
