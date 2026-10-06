@@ -505,7 +505,7 @@ foreach ($cf in $contractFiles) {
         [void]$body.Append("CREATE OR REPLACE VIEW contract_view AS SELECT * FROM _contract_data;`r`n")
         [void]$body.Append("CREATE OR REPLACE TEMP TABLE _raw_withdata AS SELECT * FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName', all_varchar = true, stop_at_empty = false) WHERE $withDataWhere;`r`n")
         # ---- MUTATION POINT ends here (the _raw_withdata line above). ----
-        [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName');`r`n")
+        [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName', all_varchar = true);`r`n")
         [void]$body.Append("SELECT 'WITHDATA_ROWS', count(*) FROM _raw_withdata;`r`n")
         [void]$body.Append("SELECT 'VIEW_ROWS', count(*) FROM contract_view;`r`n")
         if ($anchorPresent) {
