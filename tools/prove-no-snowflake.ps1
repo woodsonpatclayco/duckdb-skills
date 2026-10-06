@@ -323,7 +323,9 @@ function Invoke-UnshimmedMaterialize {
     $env:PATH = $originalPath
     try {
         $materializePath = Join-Path $repoRoot 'tools\materialize.ps1'
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
         & powershell -NoProfile -ExecutionPolicy Bypass -File $materializePath -LakeRoot $LakeRoot 2>&1 | Out-Null
+        $ErrorActionPreference = $prevEap
     } finally {
         $env:PATH = $prevPath
     }

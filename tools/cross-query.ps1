@@ -476,11 +476,19 @@ if ($Save) {
 $window = $env:DSK_WINDOW_MINUTES
 if (-not $window) { $window = 60 }
 
+$projectNoted = $false
 $extractInfos = @{}   # name -> pscustomobject{ ParquetGlob, MaterializedAt, RowCount, AgeText, Stale }
 $lakeStaleFlags = @{}   # table name -> bool (workbook_changed_since / saved-oldest-input stale)
 
 if ($extractNamesOrdered.Count -gt 0) {
-    $extractRootResolved, $usedDefaultExtractRoot = Resolve-ExtractRoot $ExtractRoot
+    try {
+        $extractRootResolved, $usedDefaultExtractRoot = Resolve-ExtractRoot $ExtractRoot -Hint '-ExtractRoot'
+    } catch {
+        Write-Output $_.Exception.Message
+        exit 2
+    }
+    Write-ProjectNote
+    $projectNoted = $true
     foreach ($name in $extractNamesOrdered) {
         $extractDir = Join-Path $extractRootResolved $name
         $sidecarPath = Join-Path $extractDir '_extract.json'
@@ -546,13 +554,20 @@ $lakeDataDir = $null
 $lakeRootResolved = $null
 $lakeExists = $false
 if ($lakeNamesOrdered.Count -gt 0 -or $Save) {
-    $lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot
+    try {
+        $lakeRootResolved, $usedDefaultLakeRoot = Resolve-LakeRoot -ExplicitRoot $LakeRoot -Hint '-LakeRoot'
+    } catch {
+        Write-Output $_.Exception.Message
+        exit 2
+    }
+    if (-not $projectNoted) { Write-ProjectNote; $projectNoted = $true }
     $lakeCatalogFile = Join-Path $lakeRootResolved 'lake.ducklake'
     $lakeDataDir = Join-Path $lakeRootResolved 'data'
     $lakeExists = Test-Path -LiteralPath $lakeCatalogFile -PathType Leaf
 }
 
-if ($lakeNamesOrdered.Count -gt 0 -and -not $lakeExists) {
+# A lake is started by materialize, never as a side effect of -Save (item 1).
+if (($lakeNamesOrdered.Count -gt 0 -or $Save) -and -not $lakeExists) {
     Fail-Refusal "ERROR,lake,no lake at $lakeRootResolved -- run tools\materialize.ps1 first"
 }
 

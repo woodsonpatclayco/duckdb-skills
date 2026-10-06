@@ -8,23 +8,26 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function Get-RepoRoot {
-    $root = $null
-    try {
-        $root = & git rev-parse --show-toplevel 2>$null
-    } catch {
-        $root = $null
+. (Join-Path $PSScriptRoot 'dsk-paths.ps1')
+
+# Project resolution (item 1): the shared resolver; no current-folder fallback.
+# Outside a git repo -StateFile is required (refusal: exit 2, nothing created).
+try {
+    if ($StateFile) {
+        $null = Get-ProjectRootOrNull
+        $repoRoot = $null
+    } else {
+        $repoRoot = Get-ProjectRoot -Hint '-StateFile'
     }
-    if ($LASTEXITCODE -eq 0 -and $root) {
-        return ($root -replace '/', '\')
-    }
-    return (Get-Location).Path
+} catch {
+    Write-Output $_.Exception.Message
+    exit 2
 }
+Write-ProjectNote
 
 if ($StateFile) {
     $resolvedStateFile = [System.IO.Path]::GetFullPath($StateFile)
 } else {
-    $repoRoot = Get-RepoRoot
     $resolvedStateFile = Join-Path (Join-Path $repoRoot '.duckdb-skills') 'state.sql'
     $resolvedStateFile = [System.IO.Path]::GetFullPath($resolvedStateFile)
 }

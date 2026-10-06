@@ -12,10 +12,9 @@ sidecar, which lets one malformed sidecar take the whole listing down. A directo
 with no _extract.json is reported UNKNOWN (no sidecar) without invoking duckdb at
 all; a non-zero exit from registry.sql is reported UNKNOWN (unreadable sidecar).
 
--ExtractRoot defaults to ~\.duckdb-skills\<project-id>\extracts. The default root is
-created if it does not exist; an explicitly passed -ExtractRoot is never created --
-it is a fixture or verification path, and creating it would make the absent-root
-check in AC2 unrepeatable across reruns.
+-ExtractRoot defaults to ~\.duckdb-skills\<project-id>\extracts. Neither the default nor
+an explicit root is ever created by this tool (read-only; item 1). Outside a git repo
+without -ExtractRoot it refuses (exit 2).
 
 Window is $env:DSK_WINDOW_MINUTES (unset means 60); ceiling is $env:DSK_MAX_AGE_MINUTES
 (unset means 1440) -- see registry.sql for the freshness rule these feed. This tool
@@ -69,11 +68,12 @@ function Get-DirectoryBytes([string]$Dir, [string]$Filter) {
 # --- resolve root, guard the zero-extracts case -----------------------------
 
 try {
-    $resolvedRoot, $usingDefault = Resolve-ExtractRoot $ExtractRoot
+    $resolvedRoot, $usingDefault = Resolve-ExtractRoot $ExtractRoot -Hint '-ExtractRoot'
 } catch {
     Write-Output $_.Exception.Message
     exit 2
 }
+Write-ProjectNote
 
 if ($usingDefault) {
     Write-Output "project-id: $(Get-ProjectId)"

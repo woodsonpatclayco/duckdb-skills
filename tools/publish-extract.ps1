@@ -82,11 +82,12 @@ if ($havePath -eq $haveJson) {
 }
 
 try {
-    $root = (Resolve-ExtractRoot $ExtractRoot)[0]
+    $root = (Resolve-ExtractRoot $ExtractRoot -Create -Hint '-ExtractRoot')[0]
 } catch {
     Write-Output $_.Exception.Message
     exit 2
 }
+Write-ProjectNote
 
 if (-not (Test-Path -LiteralPath $StagingDir -PathType Container)) {
     Write-Output "-StagingDir does not exist: $StagingDir"

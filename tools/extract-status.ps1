@@ -113,11 +113,12 @@ function Get-ExtractStatus {
 # --- main ---------------------------------------------------------------
 
 try {
-    $resolvedRoot = (Resolve-ExtractRoot $ExtractRoot)[0]
+    $resolvedRoot = (Resolve-ExtractRoot $ExtractRoot -Hint '-ExtractRoot')[0]
 } catch {
     Write-Output $_.Exception.Message
     exit 2
 }
+Write-ProjectNote
 $window = Get-EffectiveWindowMinutes
 $ceiling = Get-EffectiveCeilingMinutes
 
