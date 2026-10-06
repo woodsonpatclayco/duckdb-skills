@@ -44,3 +44,39 @@ rule needed fixing. All findings below were folded into PLAN-5.md.
 - **The `${CLAUDE_PLUGIN_ROOT}` question is settled from the documentation** before item 2,
   rather than measured inside it.
 - **Header note:** PLAN-5 is a new plan, not a fifth version of the local-SQL plan.
+
+---
+
+# Delta review — the Claude-Code-first item (commit 13d056a)
+
+**Verdict: REVISE**: small edits, the approach is sound. All findings below were folded into
+PLAN-5.md.
+
+## Blocking — fixed
+
+1. **Most fork `read-memories` files were unaccounted for, and one is used by another tool.**
+   - **What was missing:** `search.sql`, `message.sql` and `coverage.sql` were not named, and
+     `prove-no-snowflake.ps1:348` runs `search.sql`.
+   - **Fixed:** item 3a deletes all five fork `.sql` files, including the `--full` mode, and
+     removes that entrypoint.
+2. **The extract proof could pass without the single-session requirement.**
+   - **Why:** step 7 omits `runtime_seconds` silently when unobtainable, and
+     `QUERY_HISTORY_BY_SESSION()` only sees its own session (checked against DATAHUB).
+   - **Fixed:** the proof requires `runtime_seconds` > 0.
+3. **The macro proof could pass with the compat file not loaded at all.**
+   - **Fixed:** in one session, `xl_date(45000)` returns `2023-03-15` and `IFF` fails.
+   - **Also fixed:** the date baseline is captured before the change.
+
+## Non-blocking — folded in
+
+- **Fact 7 overstated `xl_date()`:** it has 3 calls, all in contracts. The others were comments.
+- **The session rule was over-broad.** Only steps 5–7 and 9 share a connector session, and
+  steps 2–4 stay model-driven.
+- **README lines 77–82 and 195** are added to item 3a.
+- **Item 3 split into 3a (removals) and 3b (connector)**, so a connector correction round
+  cannot hold the removals hostage.
+- **Smaller notes:** the expired-token browser popup, the `file://C:/` form for `GET`, and the
+  empty project column on Windows paths.
+- **Checked safe:** removing `LEN` is fine, because native `len()` covers `registry.sql:78-80`.
+- **Checked read-only via DATAHUB:** connect takes 0.6 s and `CURRENT_DATABASE()` is NULL. A
+  bare `INFORMATION_SCHEMA` fails, while the database-qualified form works.

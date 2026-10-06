@@ -8,11 +8,11 @@
 session in any project, not only from inside this repo. Development of the plugin moves from
 Cortex Code to Claude Code at the same time.
 
-Four items, four specs, in order. Each item depends on the one before it.
+Four items, five specs (item 3 splits into 3a and 3b), in order. Each item depends on the one before it.
 
 **The fork becomes Claude-Code-first** (Phil, 2026-10-06). Some of the fork's work existed to
 adapt the original skills to Cortex Code. The original project is built for Claude Code from
-the start, so under Claude Code those adaptations are undone, not carried along (item 3). Cortex
+the start, so under Claude Code those adaptations are undone, not carried along (items 3a and 3b). Cortex
 Code is unaffected: its install is a separate clone of the original project and never received
 them.
 
@@ -66,13 +66,13 @@ the local-SQL plan is deployed anywhere:
      works, using connection `DATAHUB`.
    - **Snowflake macros:** `skills\query\duckdb-compat.sql` defines 16 Snowflake-name macros
      (`IFF`, `NVL`, `DIV0`, `TO_NUMBER`, …) plus `xl_date()`.
-   - **What depends on them:** contracts, checks and examples call **only `xl_date()`** (9
-     calls), and nothing calls the 16 macros. Separately, `skills\query\SKILL.md:158-192` (the
+   - **What depends on them:** only the two contracts call anything in the file — **`xl_date()`**, 3
+     calls — and nothing calls the 16 macros. Separately, `skills\query\SKILL.md:158-192` (the
      polyglot section), `duckdb-compat.md`, `duckdb-compat-tests.csv` and
      `tools\run-compat-tests.ps1` exist for the Snowflake dialect. `prove-no-snowflake.ps1:345`
      invokes `run-compat-tests`.
    - **`read-memories`:** it was rewritten to search Cortex Code logs. Upstream's version
-     searches `~\.claude\projects\*\*.jsonl` (88 MB on this machine).
+     searches `~\.claude\projects\*\*.jsonl` (61–88 MB on this machine, depending on how it is measured).
    - **Upstream's `--here` is broken on Windows.** It turns the current folder into
      `-c-Users-woodsonp-Claude-Dev-duckdb-skills`, but the real log folder is
      `C--Users-woodsonp-Claude-Dev-duckdb-skills`.
@@ -164,32 +164,29 @@ is in some other project.
 - **State file:** running `ensure-duckdb-compat` twice from two different copies leaves exactly
   one `duckdb-compat.sql` line in `state.sql`.
 
-## Item 3 — Claude-Code-first: Snowflake through the Python connector, Cortex adaptations undone
+## Item 3a — Undo the Cortex Code adaptations
 
-**Serves:** Under Claude Code, `snowflake-extract` reaches Snowflake through the Python
-connector. The skills behave as the original project intended, apart from the features the fork
-added.
+**Serves:** Under Claude Code the `query` and `read-memories` skills behave as the original
+project intended. The features the fork added — lakehouse, contracts, extracts, the Excel
+guidance in `read-file`, and `xl_date()` — stay.
 
-- **Snowflake through the Python connector.**
-  - **What runs it:** `snowflake-extract` runs its Snowflake steps through the Python connector
-    (`py -3.12`, connection `DATAHUB`), via one small runner script in `tools\`. The model does
-    not write connector code each session. `allowed-tools` loses `snowflake_sql_execute`.
-  - **What stays the same:** the transport sequence, `COPY INTO @~/...` then `GET`. The
-    measured type facts from the local-SQL plan (the TZ/LTZ projection rule, types surviving
-    exactly) are about that sequence, so they still hold. Only the caller changes.
-  - **One connection:** every step of one materialize runs in a single connector session.
-    `QUERY_HISTORY_BY_SESSION` in step 7 depends on it.
 - **The Snowflake-dialect layer is removed; `xl_date()` stays.**
-  - **Removed:** the 16 Snowflake macros, the polyglot section of `skills\query\SKILL.md`,
-    `duckdb-compat-tests.csv`, `run-compat-tests.ps1`, and `prove-no-snowflake.ps1`'s call to
-    it.
+  - **Removed:** the 16 Snowflake macros, the polyglot section of `skills\query\SKILL.md`
+    (lines 158–191), `duckdb-compat-tests.csv`, `run-compat-tests.ps1`, and
+    `prove-no-snowflake.ps1`'s call to it (line 345).
   - **`duckdb-compat.md`:** it shrinks to what the file now holds (`xl_date()`).
-  - **The CoCo versions** stay in git history.
+  - **The Cortex Code versions** stay in git history.
 - **`read-memories` returns to upstream's Claude Code version, with two changes.**
-  - **`--here` works on Windows:** it maps the folder the way Claude Code names it
-    (`C--Users-...`).
-  - **Its description defers to shared memory.** Both answer "do you remember…" questions, and
-    they do not collide technically:
+  - **What is deleted:** every fork file in `skills\read-memories\` besides `SKILL.md`, namely
+    `search.sql`, `message.sql`, `coverage.sql`, `sqlresults.sql` and
+    `sqlresults-summary.sql`. That includes the fork's `--full <id>` mode and Cortex SQL-result
+    recovery. Neither survives.
+  - **`prove-no-snowflake.ps1`:** it loses its `read-memories:search` entrypoint (line 348,
+    plus its setup at lines 409–419).
+  - **Change 1, `--here` works on Windows:** it maps the folder the way Claude Code names it
+    (`C--Users-...`). The project column must come out non-empty on Windows paths.
+  - **Change 2, its description defers to shared memory.** Both answer "do you remember…"
+    questions, and they do not collide technically:
     - `read-memories` only **reads** Claude Code's session log files.
     - The memory service is a separate store reached through its own `memory_*` tools.
     - The skill name and tool names don't clash.
@@ -198,23 +195,47 @@ added.
     from both Claude Code and Cortex Code. `read-memories` searches raw Claude Code transcripts
     only. So the description says: check shared memory first, and use `read-memories` to find
     the exact wording of a past conversation or something memory does not hold.
-  - **Cortex SQL-result recovery is removed** (`sqlresults*.sql`). It digs past Snowflake
-    result sets out of Cortex logs. Under Claude Code those results come back from the
-    connector, and extracts persist them anyway.
+- **README:** `README.md:77-82` (Cortex log search) and `README.md:195` (the removed
+  PowerShell/`.sql` design) are rewritten to match.
 
 **Expected side effect:** shrinking `duckdb-compat.sql` changes its SHA-256, which is one of the
-four freshness keys. The first `materialize` after this item **REFRESHES** both contracts once,
-with the compat hash named as the reason. It must not SKIP. This doubles as proof that the
-four-way key still works.
+four freshness keys (`materialize.ps1:369`). The first `materialize` after this item
+**REFRESHES** both contracts once, with the compat hash named as the reason. It must not SKIP.
+This doubles as proof that the four-way key still works.
 
-**Proof:**
-- **Extracts:** materialize one small extract end-to-end through the connector into a scratch
-  extract root. The sidecar records row count, `last_altered`, role and warehouse, and DuckDB
-  reads back the same row count as `rows_unloaded`.
-- **Macros:** run against the scratch lake, `materialize` decodes the same dates as before, and
-  `SELECT IFF(true,1,2)` now fails `Catalog Error`.
-- **`read-memories --here`** run from this repo finds a phrase from this session and nothing
-  from other projects.
+**Proof**, all against a scratch lake:
+- **Baseline before any change:** materialize both contracts and save their date columns.
+- **The same run after the change:** it reports REFRESHED with the compat hash as the reason,
+  and the date columns are identical to the baseline.
+- **Macros, in one DuckDB session with the compat file loaded:** `xl_date(45000)` returns
+  `2023-03-15` and `IFF(true,1,2)` fails `Catalog Error`.
+- **`read-memories --here`** from this repo finds a phrase from this session, shows a non-empty
+  project, and nothing from other projects.
+
+## Item 3b — Snowflake extracts through the Python connector
+
+**Serves:** Under Claude Code, `snowflake-extract` reaches Snowflake through the Python
+connector instead of Cortex Code's `snowflake_sql_execute` tool.
+
+- **A small runner script** in `tools\` runs Snowflake SQL through the connector (`py -3.12`,
+  connection `DATAHUB`). The model does not write connector code each session.
+  `allowed-tools` loses `snowflake_sql_execute`.
+- **What stays the same:** the transport sequence, `COPY INTO @~/...` then `GET`. The measured
+  type facts from the local-SQL plan (the TZ/LTZ projection rule, types surviving exactly) are
+  about that sequence, so they still hold. Only the caller changes. `GET` uses the
+  forward-slash form, `file://C:/...`.
+- **Which steps share a session:** `COPY INTO`, `GET`, the `QUERY_HISTORY_BY_SESSION` lookup and
+  the stage cleanup (`SKILL.md` steps 5–7 and 9) run in **one** connector session. That
+  function only sees its own session's queries, which was checked against `DATAHUB`. The
+  metadata reads and projection building (steps 2–4) stay separate runner calls, driven by the
+  model as now.
+- **Login:** the connection uses the browser sign-in with a cached token. An expired token
+  opens a browser window mid-run, and the spec says so.
+
+**Proof:** materialize one small extract end-to-end into a scratch extract root.
+- **Sidecar:** it records row count, `last_altered`, role, warehouse and **`runtime_seconds`
+  greater than 0**. A runner that split the session would lose that last field silently.
+- **Read-back:** DuckDB reads back the same row count as `rows_unloaded`.
 
 ## Item 4 — Installed in Claude Code
 
@@ -241,7 +262,7 @@ version must never be cut while plan or task files sit at root.
 - **The Cortex Code install.** It stays on its upstream clone. Repointing Cortex at the fork is a
   one-line `registry.json` change Phil can ask for separately. This plan does not touch
   `~\.snowflake\`.
-- **Searching Cortex Code logs from Claude Code.** After item 3, `read-memories` sees Claude
+- **Searching Cortex Code logs from Claude Code.** After item 3a, `read-memories` sees Claude
   Code sessions only. Decisions from Cortex sessions reach Claude Code through shared memory, not
   through log search.
 - **Where Phil's two contracts live.** They stay in this repo's `contracts\`, which keeps working
