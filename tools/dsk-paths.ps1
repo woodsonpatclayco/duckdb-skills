@@ -56,7 +56,7 @@ function Get-ProjectRootOrNull {
 function Get-ProjectRoot([string]$Hint = 'the explicit root options this tool accepts') {
     $root = Get-ProjectRootOrNull
     if (-not $root) {
-        throw "ERROR: not inside a git repository: $((Get-Location).Path). Run from your project folder, or pass $Hint."
+        throw "ERROR: not inside a git repository: $((Get-Location).Path). Nothing was read. Run this from the project's own git folder; $Hint is only for a folder the user names."
     }
     return $root
 }

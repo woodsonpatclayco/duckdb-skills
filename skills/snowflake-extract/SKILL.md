@@ -50,6 +50,14 @@ Outside a repo without them they print `ERROR: not inside a git repository: ...`
 exit 2. Read-only tools never create folders -- only `materialize` and
 `publish-extract` do. Every tool writes `project: <id> (<root>)` to **stderr**, naming
 what it resolved; check it before trusting the answer.
+
+**A refusal is the answer -- stop there.** If a tool prints `ERROR: not inside a git
+repository: ...`, tell the user this folder has no project, and ask which project they
+mean. Do **not** look under `~\.duckdb-skills\` for some other project's lake or
+extracts, and do **not** pass `-LakeRoot` / `-ExtractRoot` / `-Contract` unless the user
+named that folder or file themselves. Reading another project's data without being asked
+is exactly what the refusal exists to prevent.
+
 ## Registry first -- check before querying Snowflake
 
 Before running any query against Snowflake, run `${CLAUDE_PLUGIN_ROOT}/tools/list-extracts.ps1` to see
