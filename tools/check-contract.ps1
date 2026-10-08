@@ -17,6 +17,9 @@ depending on any gitignored state"): skills/query/duckdb-compat.sql is resolved 
 -- relative to THIS SCRIPT's own location, never as a hardcoded absolute path and never
 via .duckdb-skills\state.sql (gitignored, so a fresh `git worktree add` checkout does
 not have it -- AC0). This mirrors tools\ensure-duckdb-compat.ps1:51's existing pattern.
+A contract that reads by table or named range (`-- @table:` / `-- @name:`, or a
+read_xlsx_table( / read_xlsx_name( call) also gets tools\xlsx_meta.py's generated macros,
+regenerated into this run's scratch folder; a sheet-only contract never runs the generator.
 
 Grammar (TASK.md Decision 1, item 4, as amended by item 5b), summarized:
   - A directive: a line whose first non-whitespace characters are `--`, optional
@@ -36,8 +39,9 @@ Grammar (TASK.md Decision 1, item 4, as amended by item 5b), summarized:
     is an error, never silently skipped.
   - Unknown-directive guard (NEW, item 5b -- replaces the former Guard 1). For each
     line, match `^\s*--\s*@([A-Za-z0-9_]+)` and take the MAXIMAL captured word. If it is
-    not EXACTLY (case-sensitive) one of the seven known keywords -- `sheet`,
-    `fingerprint`, `anchor`, `rows_floor`, `assert`, `snapshot`, `snapshot_committed` --
+    not EXACTLY (case-sensitive) one of the known keywords -- the single list in
+    tools\contract-xlsx.ps1 ($ContractDirectiveKeywords), shared with run-assertions.ps1
+    since PLAN-6 item 2 --
     emit an error naming the exact word and exit non-zero, before any view is created.
     This catches item 5's four run-assertions.ps1 directives too (`@sheet`, `@anchor`,
     `@rows_floor`, `@fingerprint`, `@snapshot`, `@snapshot_committed`) even though this
@@ -78,6 +82,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# The directive keyword list and the by-name workbook reads (PLAN-6 item 2) live in one
+# shared file, so this guard and run-assertions.ps1's cannot drift apart.
+. (Join-Path $PSScriptRoot 'contract-xlsx.ps1')
+
 if (-not (Test-Path -LiteralPath $ContractPath -PathType Leaf)) {
     Write-Output "ERROR: contract file not found: $ContractPath"
     exit 1
@@ -98,7 +106,7 @@ $compatFwd = $compatFullPath -replace '\\', '/'
 # header comment and TASK.md's table for why an alternation without \b reintroduces
 # the exact hole this guard exists to close (it would accept @snapshotX, @sheets,
 # @assertion, @snapshot_committedX as valid). Membership is exact and case-sensitive.
-$knownDirectiveKeywords = @('sheet', 'fingerprint', 'anchor', 'rows_floor', 'assert', 'snapshot', 'snapshot_committed')
+$knownDirectiveKeywords = $ContractDirectiveKeywords
 $unknownDirectivePattern = '^\s*--\s*@([A-Za-z0-9_]+)'
 
 $lines = Get-Content -LiteralPath $contractFullPath
@@ -173,9 +181,24 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $results = New-Object System.Collections.Generic.List[object]
 
 try {
+    # A contract that reads an Excel table or named range by name needs the macros
+    # tools\xlsx_meta.py generates from the workbook -- regenerated on every run, never
+    # cached. Sheet-only contracts skip this entirely and run exactly as before.
+    $xlsxRead = ''
+    $contractRaw = [System.IO.File]::ReadAllText($contractFullPath)
+    if ($assertions.Count -gt 0 -and (Test-ContractNeedsXlsxMacros $contractRaw)) {
+        $macrosFile = Join-Path $scratchDir 'xlsx-macros.sql'
+        $genError = New-XlsxMacrosFile -WorkbookPaths (Get-ContractWorkbookPaths $contractRaw) -OutFile $macrosFile
+        if ($genError) {
+            Write-Output "ERROR: $genError"
+            exit 1
+        }
+        $xlsxRead = ".read '$($macrosFile -replace '\\', '/')'`r`n"
+    }
+
     foreach ($a in $assertions) {
         $sqlFile = Join-Path $scratchDir "$($a.Name).sql"
-        $body = ".read '$compatFwd'`r`n.read '$contractFwd'`r`nSELECT $($a.Expr);`r`n"
+        $body = ".read '$compatFwd'`r`n$xlsxRead.read '$contractFwd'`r`nSELECT $($a.Expr);`r`n"
         [System.IO.File]::WriteAllText($sqlFile, $body, $utf8NoBom)
 
         # duckdb writes purely informational text to stderr on a clean run (see

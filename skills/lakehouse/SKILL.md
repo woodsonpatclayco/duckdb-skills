@@ -5,6 +5,7 @@ description: >
   history. Freshness is four-way; SKIPPED writes no history rows, REFUSED
   does. Quality directives (@anchor/@rows_floor/@assert) are opt-in -- a
   contract without them still gets truncation, consistency, fingerprint checks.
+  A contract reads a sheet (@sheet), an Excel table (@table) or a named range (@name).
 allowed-tools: Bash
 ---
 
@@ -66,6 +67,15 @@ would SKIP and keep serving the old decode silently. This is the same class of
 failure as item 1's three-macros-wrong-at-17/17-passing and the items-3+4
 decoder that was wrong for 6,654 of 18,764 dates -- both times undetected by
 checks that never looked at what actually produced the value.
+
+A contract that reads an Excel **table or named range by name** (`-- @table: <name>` or
+`-- @name: <name>` in place of `-- @sheet:`, with `read_xlsx_table(path, '<name>')` /
+`read_xlsx_name(...)` in the view) also depends on `${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py`,
+which generates those functions from the workbook on every run. For those contracts only, the
+generator's SHA-256 is folded into the same `compat_sha256` value, so a change to the
+generator re-materializes them; sheet contracts keep exactly the key they had. Their
+truncation and consistency checks read the table's own rectangle, reported as a
+`SOURCE,table,<name>,<sheet>!<range>` line. Example: `contracts/Job_Rate_Tiers.sql`.
 
 The workbook hash is read via DuckDB (`sha256(content) FROM read_blob(...)`),
 never `Get-FileHash`: confirmed this session that on a `FileShare.None`-locked

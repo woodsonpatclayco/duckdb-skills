@@ -27,10 +27,16 @@ or its two guards in any way. As of item 5b, only `@sheet` and `@fingerprint` ar
 `@rows_floor` each encode an opinion Phil has to choose, so they are now OPTIONAL
 (zero or one -- more than one is still a duplicate error, and a present-but-malformed
 value is still an error):
-    -- @sheet: <sheet name>            (REQUIRED. Used for this script's OWN raw-sheet
+    -- @sheet: <sheet name>            (REQUIRED -- or @table / @name instead, exactly one
+                                         of the three. Used for this script's OWN raw-sheet
                                          reads; the workbook PATH is never duplicated
                                          here -- it is read out of the contract's own
                                          read_xlsx(...) call by regex, per the spec)
+    -- @table: <Excel table name>      (PLAN-6 item 2. The raw reads cover exactly the
+    -- @name: <named range>             table's / named range's rectangle, resolved through
+                                         tools\xlsx_meta.py's macros, regenerated each run.
+                                         Prints SOURCE,<kind>,<name>,<sheet>!<range>. A name
+                                         on several sheets is written Sheet!Name.)
     -- @fingerprint: <col1>|<col2>|...  (REQUIRED, pipe-joined, in order, exactly as
                                          item 4's own committed header comment already
                                          does. No opinion about the data -- it restates
@@ -59,8 +65,8 @@ Unknown-directive guard (item 5b, NEW -- added to both this script and
 check-contract.ps1, same seven-keyword set, same form, run independently in each so
 neither tool is the one entry point that silently drops a typo). For each line, match
 `^\s*--\s*@([A-Za-z0-9_]+)` and take the MAXIMAL captured word; if it is not EXACTLY
-(case-sensitive) one of `sheet`, `fingerprint`, `anchor`, `rows_floor`, `assert`,
-`snapshot`, `snapshot_committed`, emit `ERROR,<contract>,unknown directive: -- @<word>`
+(case-sensitive) one of the keywords in tools\contract-xlsx.ps1's shared list
+($ContractDirectiveKeywords, PLAN-6 item 2), emit `ERROR,<contract>,unknown directive: -- @<word>`
 before any workbook read. Deliberately NOT a regex alternation of the seven keywords --
 that form (no `\b`) accepts `@snapshotX`, `@sheets`, `@assertion`, and
 `@snapshot_committedX` as valid, reintroducing the exact hole this guard exists to
@@ -138,6 +144,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'dsk-paths.ps1')
+. (Join-Path $PSScriptRoot 'contract-xlsx.ps1')
 
 # Project resolution (item 1): contracts\ is <project root>\contracts, found from the git
 # root of the current folder -- no fallback. Outside a git repo -Contract is required.
@@ -254,7 +261,7 @@ function Get-NamedDirectiveOccurrences {
 # so this script does not depend on check-contract.ps1 to catch a typo in one of ITS
 # OWN four additive directives (@sheet/@anchor/@rows_floor/@fingerprint), which
 # check-contract.ps1 never parses at all. -----------------------------------------------
-$knownDirectiveKeywords = @('sheet', 'fingerprint', 'anchor', 'rows_floor', 'assert', 'snapshot', 'snapshot_committed')
+$knownDirectiveKeywords = $ContractDirectiveKeywords   # one shared list: tools\contract-xlsx.ps1
 $unknownDirectivePattern = '^\s*--\s*@([A-Za-z0-9_]+)'
 function Get-UnknownDirectiveErrors {
     param([string[]]$Lines)
@@ -290,8 +297,8 @@ foreach ($cf in $contractFiles) {
 
     foreach ($e in (Get-UnknownDirectiveErrors -Lines $lines)) { $dirErrors.Add($e) }
 
-    # @sheet and @fingerprint need no opinion about the data -- required exactly once.
-    foreach ($kw in @('sheet', 'fingerprint')) {
+    # @fingerprint needs no opinion about the data -- required exactly once.
+    foreach ($kw in @('fingerprint')) {
         $res = Get-DirectiveOccurrences -Lines $lines -Keyword $kw
         foreach ($e in $res.Malformed) { $dirErrors.Add($e) }
         if ($res.Malformed.Count -eq 0) {
@@ -303,6 +310,20 @@ foreach ($cf in $contractFiles) {
                 $dirValues[$kw] = $res.Values[0]
             }
         }
+    }
+
+    # Where the rows come from (PLAN-6 item 2): exactly one of @sheet, @table (an Excel
+    # table / ListObject) or @name (a named range). Same colon grammar for all three.
+    $sourceKinds = @()
+    foreach ($kw in @('sheet', 'table', 'name')) {
+        $res = Get-DirectiveOccurrences -Lines $lines -Keyword $kw
+        foreach ($e in $res.Malformed) { $dirErrors.Add($e) }
+        foreach ($v in $res.Values) { $sourceKinds += $kw; $dirValues[$kw] = $v }
+    }
+    if ($sourceKinds.Count -eq 0) {
+        $dirErrors.Add("missing required directive: exactly one of -- @sheet / -- @table / -- @name")
+    } elseif ($sourceKinds.Count -gt 1) {
+        $dirErrors.Add("exactly one of -- @sheet / -- @table / -- @name is allowed (found: $(($sourceKinds | ForEach-Object { "@$_" }) -join ', '))")
     }
 
     # @anchor and @rows_floor each encode an opinion Phil has to choose -- optional
@@ -357,7 +378,9 @@ foreach ($cf in $contractFiles) {
         continue
     }
 
-    $sheetName = $dirValues['sheet']
+    $sourceKind = $sourceKinds[0]            # 'sheet', 'table' or 'name'
+    $sourceValue = $dirValues[$sourceKind]
+    $sheetName = $dirValues['sheet']          # set only for a sheet contract; else resolved below
     $anchorPresent = $dirValues.ContainsKey('anchor')
     $anchorExpr = if ($anchorPresent) { $dirValues['anchor'] } else { $null }
     $rowsFloorPresent = $dirValues.ContainsKey('rows_floor')
@@ -365,15 +388,17 @@ foreach ($cf in $contractFiles) {
     $committedFingerprint = $dirValues['fingerprint']
 
     # Workbook path is read from the contract's OWN read_xlsx(...) call -- never
-    # duplicated into a directive, per the spec ("the two could disagree").
+    # duplicated into a directive, per the spec ("the two could disagree"). Since PLAN-6
+    # item 2 that call may also be read_xlsx_table( or read_xlsx_name(.
     $rawText = Get-Content -LiteralPath $cf -Raw
-    $pathMatch = [regex]::Match($rawText, "read_xlsx\(\s*'([^']+)'", 'IgnoreCase')
-    if (-not $pathMatch.Success) {
+    $workbookPaths = Get-ContractWorkbookPaths $rawText
+    if ($workbookPaths.Count -eq 0) {
         Write-Output "ERROR,$baseName,could not find read_xlsx(<path>, ...) in contract file"
         $totalFailures++
         continue
     }
-    $workbookPathFwd = ($pathMatch.Groups[1].Value) -replace '\\', '/'
+    $workbookPathFwd = $workbookPaths[0] -replace '\\', '/'
+    $needsXlsxMacros = Test-ContractNeedsXlsxMacros $rawText
     $cfFwd = ([System.IO.Path]::GetFullPath($cf)) -replace '\\', '/'
 
     # --- ASSERT results: delegate to check-contract.ps1 verbatim, as a genuinely
@@ -439,8 +464,63 @@ foreach ($cf in $contractFiles) {
     New-Item -ItemType Directory -Path $scratchDir -Force | Out-Null
 
     try {
+        # --- By-name source (PLAN-6 item 2). The generated macros are regenerated for
+        # this run only, and the table / named range is resolved to its sheet + range
+        # through them, so the raw reads below look at exactly the table's rectangle
+        # instead of the whole sheet. A sheet contract skips all of this, and its raw
+        # read arguments are the same text as before. ----------------------------------
+        $xlsxRead = ''
+        $srcArgs = "sheet = '$sheetName'"
+        $defaultExtra = ''
+        if ($needsXlsxMacros) {
+            $macrosFile = Join-Path $scratchDir 'xlsx-macros.sql'
+            $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile
+            if ($genError) {
+                Write-Output "ERROR,$baseName,$genError"
+                $totalFailures++
+                continue
+            }
+            $xlsxRead = ".read '$($macrosFile -replace '\\', '/')'`r`n"
+        }
+        if ($sourceKind -ne 'sheet') {
+            $wbLit = "'" + ($workbookPathFwd -replace "'", "''") + "'"
+            $keyLit = "'" + ($sourceValue -replace "'", "''") + "'"
+            $resolveSql = ".mode csv`r`n.headers off`r`n$xlsxRead" + $(if ($sourceKind -eq 'table') {
+                "SELECT xlsx_table_sheet($wbLit, $keyLit), xlsx_table_range($wbLit, $keyLit), 'true';`r`n"
+            } else {
+                "SELECT xlsx_name_sheet($wbLit, $keyLit), xlsx_name_range($wbLit, $keyLit), xlsx__name_header($wbLit, $keyLit);`r`n"
+            })
+            $resolveFile = Join-Path $scratchDir 'resolve.sql'
+            [System.IO.File]::WriteAllText($resolveFile, $resolveSql, $utf8NoBom)
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            $resolveOutput = @(& duckdb -f $resolveFile 2>&1 | ForEach-Object { [string]$_ })
+            $resolveExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            if ($resolveExit -ne 0 -or $resolveOutput.Count -lt 1) {
+                Write-Output "ERROR,$baseName,could not resolve @$sourceKind '$sourceValue': $(($resolveOutput -join ' ').Trim())"
+                $totalFailures++
+                continue
+            }
+            # Sheet names may hold commas; the range and header never do -- split from the right.
+            $lastLine = $resolveOutput[-1]
+            $m3 = [regex]::Match($lastLine, '^(.*),([A-Z]+[0-9]+(?::[A-Z]+[0-9]+)?),(true|false)$')
+            if (-not $m3.Success) {
+                Write-Output "ERROR,$baseName,could not parse resolved @$sourceKind '$sourceValue': $lastLine"
+                $totalFailures++
+                continue
+            }
+            $sheetName = $m3.Groups[1].Value.Trim('"') -replace '""', '"'
+            $resolvedRange = $m3.Groups[2].Value
+            $srcArgs = "sheet = '$($sheetName -replace "'", "''")', range = '$resolvedRange', header = $($m3.Groups[3].Value)"
+            # range= switches stop_at_empty off by default; the truncation detector's
+            # "default" read must keep its meaning -- what a read that stops at the first
+            # blank row would return -- so it is asked for explicitly.
+            $defaultExtra = ', stop_at_empty = true'
+            Write-Output "SOURCE,$sourceKind,$sourceValue,$sheetName!$resolvedRange"
+        }
+
         $describeSql = ".mode csv`r`n.headers off`r`n" +
-            "CREATE OR REPLACE VIEW _raw_probe AS SELECT * FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName', all_varchar = true, stop_at_empty = false);`r`n" +
+            "CREATE OR REPLACE VIEW _raw_probe AS SELECT * FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true, stop_at_empty = false);`r`n" +
             "SELECT column_name FROM duckdb_columns() WHERE table_name = '_raw_probe' ORDER BY column_index;`r`n"
         $describeFile = Join-Path $scratchDir 'describe.sql'
         [System.IO.File]::WriteAllText($describeFile, $describeSql, $utf8NoBom)
@@ -500,12 +580,13 @@ foreach ($cf in $contractFiles) {
         $body = New-Object System.Text.StringBuilder
         [void]$body.Append(".mode csv`r`n.headers off`r`n")
         [void]$body.Append(".read '$compatFwd'`r`n")
+        [void]$body.Append($xlsxRead)
         [void]$body.Append(".read '$cfFwd'`r`n")
         [void]$body.Append("CREATE OR REPLACE TEMP TABLE _contract_data AS SELECT * FROM contract_view;`r`n")
         [void]$body.Append("CREATE OR REPLACE VIEW contract_view AS SELECT * FROM _contract_data;`r`n")
-        [void]$body.Append("CREATE OR REPLACE TEMP TABLE _raw_withdata AS SELECT * FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName', all_varchar = true, stop_at_empty = false) WHERE $withDataWhere;`r`n")
+        [void]$body.Append("CREATE OR REPLACE TEMP TABLE _raw_withdata AS SELECT * FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true, stop_at_empty = false) WHERE $withDataWhere;`r`n")
         # ---- MUTATION POINT ends here (the _raw_withdata line above). ----
-        [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', sheet = '$sheetName', all_varchar = true);`r`n")
+        [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true$defaultExtra);`r`n")
         [void]$body.Append("SELECT 'WITHDATA_ROWS', count(*) FROM _raw_withdata;`r`n")
         [void]$body.Append("SELECT 'VIEW_ROWS', count(*) FROM contract_view;`r`n")
         if ($anchorPresent) {

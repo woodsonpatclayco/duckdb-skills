@@ -117,6 +117,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot 'dsk-paths.ps1')
+. (Join-Path $PSScriptRoot 'contract-xlsx.ps1')
 
 # Project resolution (item 1): refuse BEFORE any resolver runs with -Create. Outside a
 # git repo this tool needs both -LakeRoot and -Contract; inside, the contracts folder
@@ -158,6 +159,16 @@ $lakeDataDirFwd = $lakeDataDir -replace '\\', '/'
 Write-Output "LAKE_ROOT,$lakeRootResolved"
 
 $compatSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $compatFullPath).Hash.ToLowerInvariant()
+
+# PLAN-6 item 2: a contract that reads by table / named range also depends on the macro
+# generator, so a change to tools\xlsx_meta.py must make it stale. That SHA is folded into
+# the SAME compat_sha256 manifest value (lake.manifest has a fixed 12-column schema with
+# positional inserts -- a 13th column would break every existing lake), and only for
+# contracts that use the generator: a sheet-only contract's key is exactly what it was.
+$xlsxMetaSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $XlsxMetaPath).Hash.ToLowerInvariant()
+$foldedBytes = [System.Text.Encoding]::ASCII.GetBytes("$compatSha256+$xlsxMetaSha256")
+$compatPlusXlsxSha256 = ([BitConverter]::ToString(
+    [System.Security.Cryptography.SHA256]::Create().ComputeHash($foldedBytes)) -replace '-', '').ToLowerInvariant()
 
 # --- discover contracts -------------------------------------------------------------
 
@@ -273,15 +284,17 @@ foreach ($cf in $contractFiles) {
     $contractLines = Get-Content -LiteralPath $cf
     $contractRawText = Get-Content -LiteralPath $cf -Raw
 
-    $pathMatch = [regex]::Match($contractRawText, "read_xlsx\(\s*'([^']+)'", 'IgnoreCase')
-    if (-not $pathMatch.Success) {
+    $workbookPaths = Get-ContractWorkbookPaths $contractRawText
+    if ($workbookPaths.Count -eq 0) {
         Write-Output "ERROR,$contractName,could not find read_xlsx(<path>, ...) in contract file"
         $summaryErrored++
         $anyRefused = $true
         continue
     }
-    $workbookPathFwd = $pathMatch.Groups[1].Value -replace '\\', '/'
-    $workbookPathWin = $pathMatch.Groups[1].Value -replace '/', '\'
+    $workbookPathFwd = $workbookPaths[0] -replace '\\', '/'
+    $workbookPathWin = $workbookPaths[0] -replace '/', '\'
+    $needsXlsxMacros = Test-ContractNeedsXlsxMacros $contractRawText
+    $contractCompatSha = if ($needsXlsxMacros) { $compatPlusXlsxSha256 } else { $compatSha256 }
 
     $committedFingerprint = Get-ContractDirectiveLiteral -Lines $contractLines -Keyword 'fingerprint'
     $snapshotCommittedMap = Get-ContractSnapshotCommitted -Lines $contractLines
@@ -382,7 +395,7 @@ SELECT 'TARGET_ROWS', count(*) FROM lake.$contractName;
         if ($prevMtime -ne $sourceMtime) { $changed.Add('workbook_mtime') }
         if ($prevSha -ne $sourceSha256) { $changed.Add('workbook_sha256') }
         if ($prevContractSha -ne $contractSha256) { $changed.Add('contract_sha256') }
-        if ($prevCompatSha -ne $compatSha256) { $changed.Add('compat_sha256') }
+        if ($prevCompatSha -ne $contractCompatSha) { $changed.Add('compat_sha256') }
         if ($changed.Count -gt 0) {
             $decision = 'REFRESH'; $reason = ($changed -join '+')
         }
@@ -476,7 +489,7 @@ SELECT 'TARGET_ROWS', count(*) FROM lake.$contractName;
 
         $insertSql = New-Object System.Text.StringBuilder
         [void]$insertSql.Append("LOAD ducklake;`r`nATTACH 'ducklake:$lakeCatalogFwd' AS lake (DATA_PATH '$lakeDataDirFwd');`r`n")
-        [void]$insertSql.Append("INSERT INTO lake.manifest VALUES ('$runId'::UUID, timezone('UTC', now())::TIMESTAMP, $(ConvertTo-SqlLiteral $contractName), $(ConvertTo-SqlLiteral $workbookPathFwd), '$sourceMtime'::TIMESTAMP, $(ConvertTo-SqlLiteral $sourceSha256), $(ConvertTo-SqlLiteral $contractSha256), $(ConvertTo-SqlLiteral $compatSha256), $rowCountLiteral, $snapshotLiteral, false, false);`r`n")
+        [void]$insertSql.Append("INSERT INTO lake.manifest VALUES ('$runId'::UUID, timezone('UTC', now())::TIMESTAMP, $(ConvertTo-SqlLiteral $contractName), $(ConvertTo-SqlLiteral $workbookPathFwd), '$sourceMtime'::TIMESTAMP, $(ConvertTo-SqlLiteral $sourceSha256), $(ConvertTo-SqlLiteral $contractSha256), $(ConvertTo-SqlLiteral $contractCompatSha), $rowCountLiteral, $snapshotLiteral, false, false);`r`n")
         if ($checkRows.Count -gt 0) {
             [void]$insertSql.Append("INSERT INTO lake.check_history VALUES`r`n")
             $tuples = @($checkRows | ForEach-Object {
@@ -503,16 +516,30 @@ SELECT 'TARGET_ROWS', count(*) FROM lake.$contractName;
     # --- MATERIALIZE (checks passed, or -Force overriding a failure): replace the
     # table, capture ITS OWN snapshot id in the same invocation, then write
     # manifest + check_history in a separate, later invocation. ---------------------
+    # By-name contracts (PLAN-6 item 2): regenerate the macros for this one write, read
+    # them before the contract, then delete them. Sheet-only contracts: no extra line.
+    $xlsxRead = ''
+    $macrosFile = $null
+    if ($needsXlsxMacros) {
+        $macrosFile = Join-Path $env:TEMP "dsk-materialize-xlsx-$([guid]::NewGuid().ToString('N')).sql"
+        $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile
+        if ($genError) {
+            Write-Output "ERROR,$contractName,materialize failed: $genError"
+            exit 1
+        }
+        $xlsxRead = ".read '$($macrosFile -replace '\\', '/')'`r`n"
+    }
     $materializeSql = @"
 LOAD ducklake;
 ATTACH 'ducklake:$lakeCatalogFwd' AS lake (DATA_PATH '$lakeDataDirFwd');
 .read '$compatFwd'
-.read '$($cf -replace '\\', '/')'
+$xlsxRead.read '$($cf -replace '\\', '/')'
 CREATE OR REPLACE TABLE lake.$contractName AS SELECT * FROM contract_view;
 SELECT 'ROWCOUNT', count(*) FROM lake.$contractName;
 SELECT 'SNAPSHOT', max(snapshot_id) FROM lake.snapshots();
 "@
-    $matResult = Invoke-DuckdbBatch -Sql $materializeSql
+    try { $matResult = Invoke-DuckdbBatch -Sql $materializeSql }
+    finally { if ($macrosFile) { Remove-Item -LiteralPath $macrosFile -Force -ErrorAction SilentlyContinue } }
     $rowCountLine = $matResult.Lines | Where-Object { $_ -like 'ROWCOUNT,*' } | Select-Object -First 1
     $snapshotLine = $matResult.Lines | Where-Object { $_ -like 'SNAPSHOT,*' } | Select-Object -First 1
     if ($matResult.ExitCode -ne 0 -or -not $rowCountLine -or -not $snapshotLine) {
@@ -527,7 +554,7 @@ SELECT 'SNAPSHOT', max(snapshot_id) FROM lake.snapshots();
 
     $insertSql = New-Object System.Text.StringBuilder
     [void]$insertSql.Append("LOAD ducklake;`r`nATTACH 'ducklake:$lakeCatalogFwd' AS lake (DATA_PATH '$lakeDataDirFwd');`r`n")
-    [void]$insertSql.Append("INSERT INTO lake.manifest VALUES ('$runId'::UUID, timezone('UTC', now())::TIMESTAMP, $(ConvertTo-SqlLiteral $contractName), $(ConvertTo-SqlLiteral $workbookPathFwd), '$sourceMtime'::TIMESTAMP, $(ConvertTo-SqlLiteral $sourceSha256), $(ConvertTo-SqlLiteral $contractSha256), $(ConvertTo-SqlLiteral $compatSha256), $newRowCount, $newSnapshotId, $($checksPassed.ToString().ToLowerInvariant()), $($forced.ToString().ToLowerInvariant()));`r`n")
+    [void]$insertSql.Append("INSERT INTO lake.manifest VALUES ('$runId'::UUID, timezone('UTC', now())::TIMESTAMP, $(ConvertTo-SqlLiteral $contractName), $(ConvertTo-SqlLiteral $workbookPathFwd), '$sourceMtime'::TIMESTAMP, $(ConvertTo-SqlLiteral $sourceSha256), $(ConvertTo-SqlLiteral $contractSha256), $(ConvertTo-SqlLiteral $contractCompatSha), $newRowCount, $newSnapshotId, $($checksPassed.ToString().ToLowerInvariant()), $($forced.ToString().ToLowerInvariant()));`r`n")
     if ($checkRows.Count -gt 0) {
         [void]$insertSql.Append("INSERT INTO lake.check_history VALUES`r`n")
         $tuples = @($checkRows | ForEach-Object {

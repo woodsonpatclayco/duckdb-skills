@@ -165,6 +165,30 @@ For natural language questions, also provide a brief interpretation of the resul
 per project (see "Running the tools"). `xl_date(serial)` then returns a `DATE`. See
 `${CLAUDE_PLUGIN_ROOT}/skills/query/duckdb-compat.md`.
 
+**Excel tables and named ranges — read them by name.** `read_xlsx` cannot address an
+Excel table (ListObject) or a named range, and a sheet-only read of a sheet holding a table
+can silently stop early (at a blank row) or run past the table's end — both exit 0. When the
+user names a table or named range, or a sheet holds more than one table, use
+`read_xlsx_table(path, table)` / `read_xlsx_name(path, name)` instead. They are SQL macros
+generated from the workbook by `tools/xlsx_meta.py` **in the same call** — never put a
+`.read` of them in `state.sql`, which would serve whatever workbook was generated last:
+
+```bash
+WB='C:/path/to/Data Extracts.xlsm'
+MACROS="$(mktemp --suffix=.sql)"
+command -v cygpath > /dev/null && MACROS="$(cygpath -m "$MACROS")"   # Git Bash: DuckDB needs a Windows path
+py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py" macros "$WB" -o "$MACROS" > /dev/null
+duckdb -csv -c ".read '$MACROS'" -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers') LIMIT 5"
+```
+
+- Discover what is there first: `py -3.12 .../xlsx_meta.py tables "$WB"` (name, sheet,
+  range, row count per table) and `... names "$WB"` (named ranges, with a status).
+- Every column comes back VARCHAR (`all_varchar = true`); cast explicitly.
+- A named range that exists on several sheets must be written `Sheet!Name`
+  (`'Sheet With Spaces'!Name`); bare, it is refused as ambiguous. Names pointing at `#REF!`
+  or defined by a formula are refused with the formula shown. Pass these errors to the user
+  as they are — never fall back to a sheet read.
+
 ---
 
 ## DuckDB Friendly SQL Reference
