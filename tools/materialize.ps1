@@ -165,7 +165,9 @@ $compatSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $compatFullPath).Ha
 # the SAME compat_sha256 manifest value (lake.manifest has a fixed 12-column schema with
 # positional inserts -- a 13th column would break every existing lake), and only for
 # contracts that use the generator: a sheet-only contract's key is exactly what it was.
-$xlsxMetaSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $XlsxMetaPath).Hash.ToLowerInvariant()
+# The generator is xlsx_meta.py plus the R1C1 converter it imports (PLAN-6 item 3).
+$xlsxMetaSha256 = (@($XlsxMetaPath, (Join-Path $PSScriptRoot 'xlsx_r1c1.py')) |
+    ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() }) -join '+'
 $foldedBytes = [System.Text.Encoding]::ASCII.GetBytes("$compatSha256+$xlsxMetaSha256")
 $compatPlusXlsxSha256 = ([BitConverter]::ToString(
     [System.Security.Cryptography.SHA256]::Create().ComputeHash($foldedBytes)) -replace '-', '').ToLowerInvariant()
@@ -522,7 +524,10 @@ SELECT 'TARGET_ROWS', count(*) FROM lake.$contractName;
     $macrosFile = $null
     if ($needsXlsxMacros) {
         $macrosFile = Join-Path $env:TEMP "dsk-materialize-xlsx-$([guid]::NewGuid().ToString('N')).sql"
-        $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile
+        # The formula view only matters here if contract_view itself reads it (a line of SQL,
+        # not a -- comment or directive); the @formula_* checks already ran in run-assertions.
+        $viewNeedsFormulas = [bool]($contractLines | Where-Object { $_ -notmatch '^\s*--' -and $_ -match '(?i)xlsx_formulas' })
+        $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile -Formulas:$viewNeedsFormulas
         if ($genError) {
             Write-Output "ERROR,$contractName,materialize failed: $genError"
             exit 1
@@ -539,7 +544,11 @@ SELECT 'ROWCOUNT', count(*) FROM lake.$contractName;
 SELECT 'SNAPSHOT', max(snapshot_id) FROM lake.snapshots();
 "@
     try { $matResult = Invoke-DuckdbBatch -Sql $materializeSql }
-    finally { if ($macrosFile) { Remove-Item -LiteralPath $macrosFile -Force -ErrorAction SilentlyContinue } }
+    finally {
+        if ($macrosFile) {
+            Remove-Item -LiteralPath $macrosFile, "$macrosFile.formulas.csv" -Force -ErrorAction SilentlyContinue
+        }
+    }
     $rowCountLine = $matResult.Lines | Where-Object { $_ -like 'ROWCOUNT,*' } | Select-Object -First 1
     $snapshotLine = $matResult.Lines | Where-Object { $_ -like 'SNAPSHOT,*' } | Select-Object -First 1
     if ($matResult.ExitCode -ne 0 -or -not $rowCountLine -or -not $snapshotLine) {

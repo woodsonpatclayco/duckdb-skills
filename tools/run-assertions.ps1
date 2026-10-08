@@ -370,6 +370,28 @@ foreach ($cf in $contractFiles) {
         }
     }
 
+    # --- formula checks (PLAN-6 item 4): @formula_consistent / @formula_errors_max /
+    # @formula_fingerprint, named like @assert and sharing its name space (both become
+    # ASSERT,<name>,... lines). Value syntax is checked here, before any workbook read. ----
+    $formulaChecks = New-Object System.Collections.Generic.List[object]
+    $assertNames = @($lines | ForEach-Object { if ($_ -match '^\s*--\s*@assert\s*([A-Za-z0-9_]+)\s*:') { $Matches[1] } })
+    $fcSeen = @{}
+    foreach ($kw in $FormulaCheckKeywords) {
+        $res = Get-NamedDirectiveOccurrences -Lines $lines -Keyword $kw
+        foreach ($e in $res.Malformed) { $dirErrors.Add($e) }
+        foreach ($e in $res.Duplicates) { $dirErrors.Add($e) }
+        foreach ($n in $res.ByName.Keys) {
+            if ($fcSeen.ContainsKey($n) -or $assertNames -contains $n) {
+                $dirErrors.Add("duplicate check name '$n' (formula checks and @assert share one set of names)")
+                continue
+            }
+            $fcSeen[$n] = $true
+            $probe = Get-FormulaCheckSql -Keyword $kw -Value $res.ByName[$n] -WorkbookPath 'x'
+            if ($probe.Error) { $dirErrors.Add("'@$kw $n': $($probe.Error)"); continue }
+            $formulaChecks.Add([pscustomobject]@{ Name = $n; Keyword = $kw; Value = $res.ByName[$n] })
+        }
+    }
+
     if ($dirErrors.Count -gt 0) {
         foreach ($e in $dirErrors) {
             Write-Output "ERROR,$baseName,$e"
@@ -399,6 +421,7 @@ foreach ($cf in $contractFiles) {
     }
     $workbookPathFwd = $workbookPaths[0] -replace '\\', '/'
     $needsXlsxMacros = Test-ContractNeedsXlsxMacros $rawText
+    $needsFormulas = Test-ContractNeedsFormulas $rawText
     $cfFwd = ([System.IO.Path]::GetFullPath($cf)) -replace '\\', '/'
 
     # --- ASSERT results: delegate to check-contract.ps1 verbatim, as a genuinely
@@ -474,7 +497,7 @@ foreach ($cf in $contractFiles) {
         $defaultExtra = ''
         if ($needsXlsxMacros) {
             $macrosFile = Join-Path $scratchDir 'xlsx-macros.sql'
-            $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile
+            $genError = New-XlsxMacrosFile -WorkbookPaths $workbookPaths -OutFile $macrosFile -Formulas:$needsFormulas
             if ($genError) {
                 Write-Output "ERROR,$baseName,$genError"
                 $totalFailures++
@@ -537,7 +560,10 @@ foreach ($cf in $contractFiles) {
             continue
         }
 
-        $rawColumns = @($describeOutput | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -ne '' })
+        # .mode csv wraps a name holding a quote, comma or apostrophe in "...", doubling any
+        # inner ". Undo exactly that (found by PLAN-6 item 4: "SDI On This Month's Costs").
+        $rawColumns = @($describeOutput | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -ne '' } |
+            ForEach-Object { if ($_.Length -ge 2 -and $_.StartsWith('"') -and $_.EndsWith('"')) { $_.Substring(1, $_.Length - 2).Replace('""', '"') } else { $_ } })
         # ---- MUTATION POINT ends here: $rawColumns is "every column read_xlsx
         # returns", discovered independently of the contract's own projection. ----
 
@@ -620,7 +646,11 @@ foreach ($cf in $contractFiles) {
         foreach ($line in ($phase2Output | ForEach-Object { [string]$_ })) {
             $m2 = [regex]::Match($line, '^([^,]+),(.*)$')
             if ($m2.Success) {
-                $values[$m2.Groups[1].Value] = $m2.Groups[2].Value
+                $v2 = $m2.Groups[2].Value
+                # Same CSV quoting as the column probe above: a value holding a comma, quote or
+                # apostrophe comes back as "..." -- unwrap it (PLAN-6 item 4).
+                if ($v2.Length -ge 2 -and $v2.StartsWith('"') -and $v2.EndsWith('"')) { $v2 = $v2.Substring(1, $v2.Length - 2).Replace('""', '"') }
+                $values[$m2.Groups[1].Value] = $v2
             }
         }
 
@@ -718,6 +748,28 @@ foreach ($cf in $contractFiles) {
                 Write-Output "SNAPSHOT_DRIFT,$sn,committed=$committedSnap,observed=$observedSnap"
             }
             # No failure increment, deliberately, on either branch above.
+        }
+
+        # --- formula checks (PLAN-6 item 4): one small duckdb run each, over the formula
+        # view generated above, so one check's error cannot hide another's result. ---------
+        foreach ($fc in ($formulaChecks | Sort-Object Name)) {
+            $q = Get-FormulaCheckSql -Keyword $fc.Keyword -Value $fc.Value -WorkbookPath $workbookPathFwd
+            $fcFile = Join-Path $scratchDir "formula-$($fc.Name).sql"
+            [System.IO.File]::WriteAllText($fcFile, ".mode csv`r`n.headers on`r`n$xlsxRead$($q.Sql)`r`n", $utf8NoBom)
+            $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+            $fcOut = @(& duckdb -f $fcFile 2>&1 | ForEach-Object { [string]$_ })
+            $fcExit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEap
+            $totalAssertions++
+            $row = $null
+            if ($fcExit -eq 0) { $row = @($fcOut | ConvertFrom-Csv) | Select-Object -First 1 }
+            if ($fcExit -ne 0 -or -not $row) {
+                Write-Output "ASSERT,$($fc.Name),ERROR,@$($fc.Keyword): $((($fcOut -join ' ') -replace '\s+', ' ').Trim())"
+                $totalFailures++
+                continue
+            }
+            Write-Output "ASSERT,$($fc.Name),$($row.status),$(($row.detail -replace '\s+', ' ').Trim())"
+            if ($row.status -ne 'PASS') { $totalFailures++ }
         }
     } finally {
         Remove-Item -LiteralPath $scratchDir -Recurse -Force -ErrorAction SilentlyContinue

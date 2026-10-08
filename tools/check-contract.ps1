@@ -188,7 +188,11 @@ try {
     $contractRaw = [System.IO.File]::ReadAllText($contractFullPath)
     if ($assertions.Count -gt 0 -and (Test-ContractNeedsXlsxMacros $contractRaw)) {
         $macrosFile = Join-Path $scratchDir 'xlsx-macros.sql'
-        $genError = New-XlsxMacrosFile -WorkbookPaths (Get-ContractWorkbookPaths $contractRaw) -OutFile $macrosFile
+        # The formula view is only worth its full-workbook read when an @assert (or the view
+        # itself) queries it; the @formula_* checks are run by run-assertions.ps1, not here.
+        $assertsNeedFormulas = ($contractRaw -match '(?im)^\s*--\s*@assert\b.*\bxlsx_formulas\b') -or
+                               ($contractRaw -match '(?i)read_xlsx_formulas\(')
+        $genError = New-XlsxMacrosFile -WorkbookPaths (Get-ContractWorkbookPaths $contractRaw) -OutFile $macrosFile -Formulas:$assertsNeedFormulas
         if ($genError) {
             Write-Output "ERROR: $genError"
             exit 1
@@ -278,6 +282,14 @@ foreach ($r in $results) {
         Write-Output "$($r.Status) $($r.Name)"
     }
     if ($r.Status -ne 'PASS') { $anyFailure = $true }
+}
+
+# PLAN-6 item 4: the @formula_* checks are evaluated by run-assertions.ps1. Say so for each,
+# rather than leave a reader of this tool's output thinking they ran and passed.
+foreach ($line in $lines) {
+    if ($line -match '^\s*--\s*@(formula_consistent|formula_errors_max|formula_fingerprint)\s+([A-Za-z0-9_]+)\s*:') {
+        Write-Output "SKIPPED $($Matches[2]) (@$($Matches[1]) is evaluated by run-assertions.ps1)"
+    }
 }
 
 Write-Output "assertion_count=$($assertions.Count)"

@@ -525,8 +525,9 @@ def case_macro(name, params, whens, fallback):
 
 
 def cmd_macros(a):
-    t_sheet, t_range = [], []
+    t_sheet, t_range, t_cols = [], [], []
     n_sheet, n_range, n_header = [], [], []
+    sheet_whens = []
     loaded = []
     for path in a.workbooks:
         wb = Workbook(path)
@@ -534,9 +535,11 @@ def cmd_macros(a):
             p = norm_path(wb.path)
             loaded.append(wb.path)
             pc = f"xlsx__norm(p) = {sql_str(p)}"
+            sheet_whens.append((f"{pc} AND lower(s) IN ({', '.join(sql_str(s.lower()) for s, _p in wb.sheets)})", "true"))
             for t in wb.tables:
                 cond = f"{pc} AND lower(t) = {sql_str(t['table'].lower())}"
                 t_sheet.append((cond, sql_str(t["sheet"])))
+                t_cols.append((cond, "[" + ", ".join(sql_str(c.lower()) for c in t["colnames"]) + "]::VARCHAR[]"))
                 if t["header_rows"] == 0:
                     msg = (f"read_xlsx_table: table {t['table']} on sheet {t['sheet']} has no header row "
                            f"(headerRowCount=0); refusing to guess column names")
@@ -594,6 +597,16 @@ def cmd_macros(a):
         else f"CREATE OR REPLACE MACRO xlsx_name_range(p, n) AS {n_unknown};",
         case_macro("xlsx__name_header", "p, n", n_header, n_unknown) if n_header
         else f"CREATE OR REPLACE MACRO xlsx__name_header(p, n) AS {n_unknown};",
+        # Lookups the formula checks (PLAN-6 item 4) use to refuse a scope that names nothing,
+        # instead of silently matching zero cells and passing.
+        case_macro("xlsx_table_columns", "p, t", t_cols, t_unknown) if t_cols
+        else f"CREATE OR REPLACE MACRO xlsx_table_columns(p, t) AS {t_unknown};",
+        case_macro("xlsx__is_table", "p, t", [(c, "true") for c, _v in t_sheet], "false") if t_sheet
+        else "CREATE OR REPLACE MACRO xlsx__is_table(p, t) AS false;",
+        case_macro("xlsx__has_sheet", "p, s", sheet_whens,
+                   "error('no sheet ''' || s || ''' in ' || p)"),
+        "CREATE OR REPLACE MACRO xlsx__one_cell(n, r) AS CASE WHEN contains(r, ':') THEN "
+        "error('named range ' || n || ' is ' || r || ', not one cell') ELSE r END;",
         # range= is sheet-relative and switches stop_at_empty off, so the read is exactly the
         # table's rectangle: header row through the last data row (totals row trimmed).
         "CREATE OR REPLACE MACRO read_xlsx_table(p, t) AS TABLE FROM query("

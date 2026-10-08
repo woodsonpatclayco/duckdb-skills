@@ -103,7 +103,7 @@ Install or update DuckDB extensions. Supports `name@repo` syntax for community e
 ```
 
 ### `lakehouse`
-Materialize Excel contracts into a DuckLake lake, then check its status and check history. Freshness is reported per table; nothing is refreshed on your behalf. A contract reads a whole sheet (`-- @sheet:`), or an Excel table or named range by its name (`-- @table:` / `-- @name:`, through `read_xlsx_table` / `read_xlsx_name`, which `tools/xlsx_meta.py` generates from the workbook on every run). The `query` skill can use the same two functions for one-off reads.
+Materialize Excel contracts into a DuckLake lake, then check its status and check history. Freshness is reported per table; nothing is refreshed on your behalf. A contract reads a whole sheet (`-- @sheet:`), or an Excel table or named range by its name (`-- @table:` / `-- @name:`, through `read_xlsx_table` / `read_xlsx_name`, which `tools/xlsx_meta.py` generates from the workbook on every run). The `query` skill can use the same two functions for one-off reads. A contract can also check the workbook's **formulas**, which DuckDB never sees: `@formula_consistent` (a table column holds one formula on every row, nothing typed over it), `@formula_errors_max` (error cells have not grown), `@formula_fingerprint` (a key formula has not changed). Formulas are compared position-independently (R1C1), and failures show the A1 formula beside it.
 
 ```
 /duckdb-skills:lakehouse what's the lake status?

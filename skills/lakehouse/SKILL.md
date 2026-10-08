@@ -5,7 +5,8 @@ description: >
   history. Freshness is four-way; SKIPPED writes no history rows, REFUSED
   does. Quality directives (@anchor/@rows_floor/@assert) are opt-in -- a
   contract without them still gets truncation, consistency, fingerprint checks.
-  A contract reads a sheet (@sheet), an Excel table (@table) or a named range (@name).
+  A contract reads a sheet (@sheet), an Excel table (@table) or a named range (@name),
+  and can check the workbook's formulas (@formula_consistent/_errors_max/_fingerprint).
 allowed-tools: Bash
 ---
 
@@ -143,6 +144,37 @@ Decision 1 keeps only the verdict), and this tool never recomputes an
 assertion's expression to recover it -- a second evaluation would be a second
 source of truth. `${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1 -History <contract>` prints an explicit
 note on every such row for this reason.
+
+## Formula checks -- `@formula_consistent`, `@formula_errors_max`, `@formula_fingerprint`
+
+DuckDB reads only the values Excel cached, never formulas. These three named directives
+(same `-- @kw <name>: <value>` grammar as `@assert`, sharing its set of names) check the
+workbook's formulas themselves, evaluated by `${CLAUDE_PLUGIN_ROOT}/tools/run-assertions.ps1` as
+`ASSERT,<name>,PASS|FAIL,<detail>` lines -- so they gate materialization and land in
+`check_history` as `invariant`. `check-contract.ps1` prints `SKIPPED <name>` for them.
+
+```sql
+-- @formula_consistent sdi_basis_consistent: Combined_SDI_Data[SDI Basis]
+-- @formula_fingerprint sdi_basis_formula: Combined_SDI_Data[SDI Basis] == INDEX(_xlfn.ANCHORARRAY(R10C[34]),RC33)
+-- @formula_errors_max workbook_errors: * <= 748
+```
+
+- `@formula_consistent <name>: Tbl[Col]` -- every data row of the column holds a formula, all
+  the same. Compared in **R1C1** form, because one logical formula is stored with different A1
+  text on every row (`...$AG10)`, `...$AG11)`). A typed-over value or a blank fails it.
+- `@formula_fingerprint <name>: <scope> == <R1C1>` -- the column's (or one cell's) formula is
+  still the committed one. Catches an edit Excel copied down the whole column, which leaves it
+  perfectly consistent. Unrelated to `@fingerprint`, which is the view's column-name list.
+- `@formula_errors_max <name>: <scope> <= <n>` -- error cells (`#REF!`, `#N/A`, ... -- formula
+  results and plain error values both) have not grown past `n`. Always reports the count by code.
+- `<scope>`: `*` (whole workbook), `Sheet!` or `'Sheet name'!`, `Tbl`, `Tbl[Col]`, `Sheet!A1`, or
+  a one-cell named range. Split at the first ` <= ` / ` == ` (spaces required). A scope naming
+  nothing that exists is an ERROR, never a pass over zero cells.
+- Failures name a sample cell and show its A1 formula beside the R1C1 form.
+- The checks read `xlsx_formulas`, built only for contracts that use them (a full read of every
+  sheet). A free-form `-- @assert` may query `xlsx_formulas` directly for anything the three
+  don't cover. Worked example and planted-defect proof: `tests/contracts/SDI_Combined_Formulas.sql`,
+  `tests/prove-formula-checks.ps1`.
 
 ## Joining a lake table to a Snowflake extract
 
