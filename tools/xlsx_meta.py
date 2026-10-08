@@ -9,8 +9,12 @@ Subcommands:
   tables <workbook>            one row per table: name, sheet, ref, data range, header/totals rows, columns
   names  <workbook>            one row per defined name, plus one 'ambiguous' row per bare name that
                                is defined more than once; hidden _xlnm.* built-ins excluded
-  macros <workbook>... [-o F]  SQL defining xlsx_table_sheet/_range, read_xlsx_table,
-                               xlsx_name_sheet/_range, read_xlsx_name for the given workbooks
+  macros <workbook>... [-o F] [--formulas]
+                               SQL defining xlsx_table_sheet/_range, read_xlsx_table,
+                               xlsx_name_sheet/_range, read_xlsx_name for the given workbooks;
+                               with --formulas also the xlsx_formulas view / read_xlsx_formulas
+  formulas <workbook> [-o F]   CSV: one row per formula cell, per error cell, and per non-formula
+                               cell in a table column that has formulas (item 3); R1C1 included
 
 Standard library only (py -3.12). The workbook is opened read-only as a zip and never written.
 The generated SQL is regenerated on every run and never committed -- nothing in it can go stale.
@@ -147,15 +151,14 @@ class Workbook:
                 self.tables.append(self._table(sheet, tgt))
 
     def _table(self, sheet, part):
-        # Only the <table> tag's own attributes: its <autoFilter> child has a different ref.
-        for _ev, el in ET.iterparse(io.BytesIO(self.z.read(part)), events=("start",)):
-            if local(el.tag) == "table":
-                root = el
-                break
-        ncols = None
-        for el in root.iter():
+        # <table> is the root element; only ITS attributes are used -- its <autoFilter> child
+        # has a different ref (it excludes the totals row).
+        root = ET.fromstring(self.z.read(part))
+        ncols, colnames = None, []
+        for el in root:
             if local(el.tag) == "tableColumns":
-                ncols = int(el.get("count") or len(list(el)))
+                colnames = [c.get("name") for c in el if local(c.tag) == "tableColumn"]
+                ncols = int(el.get("count") or len(colnames))
                 break
         ref = root.get("ref")
         header = int(root.get("headerRowCount", "1"))
@@ -173,6 +176,8 @@ class Workbook:
             "totals_rows": totals,
             "data_rows": data_last - data_first + 1,
             "columns": ncols if ncols is not None else c2 - c1 + 1,
+            "colnames": colnames,
+            "body": (c1, data_first, c2, data_last),
             "part": part,
         }
 
@@ -215,6 +220,240 @@ class Workbook:
                 return {"status": "ok", "sheet": sheet, "range": area_text(*area),
                         "rows": r2 - r1 + 1}
         return {"status": "formula"}
+
+
+# ---------------------------------------------------------------- formulas (PLAN-6 item 3)
+
+FORMULA_COLS = ["workbook_key", "sheet", "cell", "row", "col", "table_name", "table_column",
+                "kind", "formula_a1", "formula_r1c1", "cached_value", "error"]
+_REF = re.compile(r"([A-Z]+)(\d+)")
+
+
+def shared_strings(z):
+    """The shared-string table, so a cached string value can be shown as text."""
+    if "xl/sharedStrings.xml" not in z.namelist():
+        return []
+    out = []
+    with z.open("xl/sharedStrings.xml") as f:
+        for _ev, el in ET.iterparse(f, events=("end",)):
+            if local(el.tag) != "si":
+                continue
+            parts = []
+            for ch in el:                       # plain <t>, or rich-text runs <r><t>; never <rPh>
+                if local(ch.tag) == "t":
+                    parts.append(ch.text or "")
+                elif local(ch.tag) == "r":
+                    parts += [t.text or "" for t in ch if local(t.tag) == "t"]
+            out.append("".join(parts))
+            el.clear()
+    return out
+
+
+def iter_cells(z, part):
+    """Stream a sheet's cells: (row, col, cell_type, formula, value). formula is None or
+    (kind, ref, si, text). Never holds more than one row in memory."""
+    with z.open(part) as f:
+        sheet_data, row, col = None, 0, 0
+        for ev, el in ET.iterparse(f, events=("start", "end")):
+            tag = local(el.tag)
+            if ev == "start":
+                if tag == "sheetData":
+                    sheet_data = el
+                elif tag == "row":
+                    row, col = int(el.get("r") or row + 1), 0
+                continue
+            if tag == "c":
+                ref = el.get("r")
+                m = _REF.fullmatch(ref) if ref else None
+                if m:
+                    col, row = col_to_num(m.group(1)), int(m.group(2))
+                else:
+                    col += 1
+                fml, val = None, None
+                for ch in el:
+                    lt = local(ch.tag)
+                    if lt == "f":
+                        fml = (ch.get("t") or "normal", ch.get("ref"), ch.get("si"), ch.text or "")
+                    elif lt == "v":
+                        val = ch.text
+                    elif lt == "is":
+                        val = "".join(t.text or "" for t in ch.iter() if local(t.tag) == "t")
+                yield row, col, el.get("t"), fml, val
+            elif tag == "row" and sheet_data is not None:
+                sheet_data.clear()
+
+
+def cell_value(ctype, val, sst):
+    if val is None:
+        return ""
+    if ctype == "s":
+        try:
+            return sst[int(val)]
+        except (ValueError, IndexError):
+            return val
+    if ctype == "b":
+        return "TRUE" if val == "1" else "FALSE"
+    return val
+
+
+def extract_formulas(wb):
+    """Yield one dict per row of the formula view (see FORMULA_COLS):
+      - every formula cell (kind normal / shared / array / data-table), with its A1 text as
+        Excel stored it (shared dependents: translated from their master) and its R1C1 form;
+      - every cell showing an error (t="e"), formula or not -- query-written #N/A values too;
+      - every non-formula cell (typed value or blank) in the data body of a table column that
+        holds a formula in at least one of its cells. Decided from the cells, never from the
+        table's calculatedColumnFormula, which is often stale."""
+    from xlsx_r1c1 import tokenize, render_a1, render_r1c1
+    key = norm_path(wb.path)
+    sst = shared_strings(wb.z)
+    tables_by_sheet = {}
+    for t in wb.tables:
+        tables_by_sheet.setdefault(t["sheet"], []).append(t)
+
+    for sheet, part in wb.sheets:
+        if not part or part not in wb.z.namelist():
+            continue                                   # chart sheets, dialog sheets
+        tables = tables_by_sheet.get(sheet, [])
+
+        def table_at(r, c):
+            for t in tables:
+                c1, r1, c2, r2 = t["body"]
+                if c1 <= c <= c2 and r1 <= r <= r2:
+                    names = t["colnames"]
+                    i = c - c1
+                    return t, (names[i] if i < len(names) else "")
+            return None, ""
+
+        def row_of(r, c, tbl, tcol, kind, a1, r1c1, value, error):
+            return {"workbook_key": key, "sheet": sheet, "cell": f"{num_to_col(c)}{r}", "row": r,
+                    "col": c, "table_name": tbl["table"] if tbl else "", "table_column": tcol,
+                    "kind": kind, "formula_a1": a1, "formula_r1c1": r1c1,
+                    "cached_value": value, "error": error}
+
+        masters = {}            # si -> (tokens, row, col, r1c1)
+        pending = []            # shared dependents seen before their master
+        formula_cols = set()    # (table, column index) holding >= 1 formula cell
+        emitted = set()         # (row, col) already written for a table body
+        for r, c, ctype, fml, val in iter_cells(wb.z, part):
+            if fml is None and ctype != "e":
+                continue
+            value = cell_value(ctype, val, sst)
+            error = val if ctype == "e" else ""
+            tbl, tcol = table_at(r, c)
+            if fml is None:
+                if tbl:
+                    emitted.add((r, c))
+                yield row_of(r, c, tbl, tcol, "none", "", "", value, error)
+                continue
+            fkind, _ref, si, text = fml
+            if tbl:
+                formula_cols.add((tbl["table"], c))
+                emitted.add((r, c))
+            if fkind == "shared":
+                if text:
+                    toks = tokenize(text)
+                    masters[si] = (toks, r, c, render_r1c1(toks, r, c))
+                    yield row_of(r, c, tbl, tcol, "shared", text, masters[si][3], value, error)
+                elif si in masters:
+                    toks, mr, mc, mr1c1 = masters[si]
+                    yield row_of(r, c, tbl, tcol, "shared", render_a1(toks, r - mr, c - mc), mr1c1,
+                                 value, error)
+                else:
+                    pending.append(row_of(r, c, tbl, tcol, "shared", si, "", value, error))
+            elif fkind == "dataTable":
+                yield row_of(r, c, tbl, tcol, "data-table", text, text, value, error)
+            else:
+                yield row_of(r, c, tbl, tcol, fkind, text, render_r1c1(tokenize(text), r, c),
+                             value, error)
+        for p in pending:                              # master came later in the file
+            si = p["formula_a1"]
+            if si in masters:
+                toks, mr, mc, mr1c1 = masters[si]
+                p["formula_a1"] = render_a1(toks, p["row"] - mr, p["col"] - mc)
+                p["formula_r1c1"] = mr1c1
+            else:
+                p["formula_a1"] = f"(shared formula si={si}: master cell not found)"
+            yield p
+
+        # Second pass, only where a table column has formulas: its non-formula data cells.
+        if not formula_cols:
+            continue
+        want = {}
+        for t in tables:
+            c1, r1, c2, r2 = t["body"]
+            for c in range(c1, c2 + 1):
+                if (t["table"], c) in formula_cols:
+                    want[c] = t
+        for r, c, ctype, fml, val in iter_cells(wb.z, part):
+            t = want.get(c)
+            if not t or fml is not None:
+                continue
+            c1, r1, c2, r2 = t["body"]
+            if not r1 <= r <= r2:
+                continue
+            if (r, c) in emitted:
+                continue
+            value = cell_value(ctype, val, sst)
+            if value == "":
+                continue                               # an empty <c>: reported as blank below
+            yield row_of(r, c, t, t["colnames"][c - c1] if c - c1 < len(t["colnames"]) else "",
+                         "none", "", "", value, "")
+            emitted.add((r, c))
+        for c, t in sorted(want.items()):              # blank cells: no <c> element, or empty
+            c1, r1, c2, r2 = t["body"]
+            tcol = t["colnames"][c - c1] if c - c1 < len(t["colnames"]) else ""
+            for r in range(r1, r2 + 1):
+                if (r, c) not in emitted:
+                    yield row_of(r, c, t, tcol, "none", "", "", "", "")
+
+
+def write_formulas_csv(workbooks, out_path):
+    """Formula rows for every workbook into one CSV. Returns the row count."""
+    n = 0
+    with open(out_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=FORMULA_COLS, lineterminator="\n")
+        w.writeheader()
+        for path in workbooks:
+            wb = Workbook(path)
+            try:
+                for row in extract_formulas(wb):
+                    w.writerow(row)
+                    n += 1
+            finally:
+                wb.close()
+    return n
+
+
+def formulas_view_sql(csv_path, workbooks):
+    """The xlsx_formulas view over the CSV, and read_xlsx_formulas(path) over the view."""
+    cols = ", ".join(f"'{c}': '{'BIGINT' if c in ('row', 'col') else 'VARCHAR'}'" for c in FORMULA_COLS)
+    keys = ", ".join(sql_str(norm_path(p)) for p in workbooks)
+    return "\n".join([
+        f"CREATE OR REPLACE VIEW xlsx_formulas AS FROM read_csv({sql_str(csv_path.replace(chr(92), '/'))}, "
+        f"header = true, quote = '\"', escape = '\"', delim = ',', strict_mode = true, "
+        f"columns = {{{cols}}});",
+        f"CREATE OR REPLACE MACRO xlsx__formulas_key(p) AS CASE WHEN xlsx__norm(p) IN ({keys}) "
+        f"THEN xlsx__norm(p) ELSE error('read_xlsx_formulas: formulas of ' || p || ' were not "
+        f"extracted -- pass it to tools/xlsx_meta.py macros --formulas') END;",
+        "CREATE OR REPLACE MACRO read_xlsx_formulas(p) AS TABLE "
+        "FROM xlsx_formulas WHERE workbook_key = xlsx__formulas_key(p);",
+    ])
+
+
+def cmd_formulas(a):
+    if a.output:
+        n = write_formulas_csv([a.workbook], a.output)
+        print(f"wrote {a.output}: {n} rows")
+        return
+    w = csv.DictWriter(sys.stdout, fieldnames=FORMULA_COLS, lineterminator="\n")
+    w.writeheader()
+    wb = Workbook(a.workbook)
+    try:
+        for row in extract_formulas(wb):
+            w.writerow(row)
+    finally:
+        wb.close()
 
 
 # ---------------------------------------------------------------- output
@@ -366,12 +605,25 @@ def cmd_macros(a):
         " || ', range = ' || xlsx__q(xlsx_name_range(p, n)) || ', header = '"
         " || coalesce(header, xlsx__name_header(p, n))::VARCHAR || ', all_varchar = true)');",
     ]
+    formula_note = ""
+    if a.formulas:
+        # The formula view streams every sheet, so it is built only when asked for.
+        if not a.output:
+            raise SystemExit("ERROR: --formulas needs -o (the formula rows go to <output>.formulas.csv)")
+        csv_path = os.path.abspath(a.output) + ".formulas.csv"
+        n = write_formulas_csv(loaded, csv_path)
+        out.append(formulas_view_sql(csv_path, loaded))
+        formula_note = f", {n} formula rows"
+    else:
+        out.append("CREATE OR REPLACE MACRO read_xlsx_formulas(p) AS TABLE SELECT error("
+                   "'read_xlsx_formulas: formulas were not extracted -- run tools/xlsx_meta.py "
+                   "macros with --formulas') AS error;")
     text = "\n".join(out) + "\n"
     if a.output:
         with open(a.output, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         print(f"wrote {a.output}: {len(t_sheet)} tables, {len(n_sheet)} names, "
-              f"{len(loaded)} workbook(s)")
+              f"{len(loaded)} workbook(s){formula_note}")
     else:
         sys.stdout.write(text)
 
@@ -387,7 +639,14 @@ def main(argv=None):
     s = sub.add_parser("macros")
     s.add_argument("workbooks", nargs="+")
     s.add_argument("-o", "--output", help="write the SQL here instead of stdout")
+    s.add_argument("--formulas", action="store_true",
+                   help="also extract every formula / error cell into <output>.formulas.csv and "
+                        "define the xlsx_formulas view and read_xlsx_formulas(path)")
     s.set_defaults(fn=cmd_macros)
+    s = sub.add_parser("formulas")
+    s.add_argument("workbook")
+    s.add_argument("-o", "--output", help="write the CSV here instead of stdout")
+    s.set_defaults(fn=cmd_formulas)
     a = ap.parse_args(argv)
     a.fn(a)
 

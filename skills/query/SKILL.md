@@ -189,6 +189,26 @@ duckdb -csv -c ".read '$MACROS'" -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers
   or defined by a formula are refused with the formula shown. Pass these errors to the user
   as they are — never fall back to a sheet read.
 
+**Excel formulas.** `read_xlsx` returns cached values only, never formula text. Add
+`--formulas` to the `macros` call above and the same `.read` also defines
+`read_xlsx_formulas(path)`: one row per formula cell, per cell showing an error (formula or
+not — query-written `#N/A` values included), and per non-formula cell (typed value or blank)
+inside a table column that has formulas. Columns: `sheet, cell, row, col, table_name,
+table_column, kind` (normal / shared / array / data-table / none), `formula_a1` (as Excel
+stored it, no leading `=`), `formula_r1c1` (position-independent: one logical formula has one
+R1C1 form on every row), `cached_value, error`. It streams every sheet, so only add
+`--formulas` when the question is about formulas. Example — formula columns of a table that
+are not one consistent formula:
+
+```bash
+py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py" macros "$WB" --formulas -o "$MACROS" > /dev/null
+duckdb -csv -c ".read '$MACROS'" -c "
+  SELECT table_name, table_column, count(DISTINCT formula_r1c1) AS forms,
+         count(*) FILTER (WHERE kind = 'none') AS non_formula_cells
+  FROM read_xlsx_formulas('$WB') WHERE table_name <> ''
+  GROUP BY ALL HAVING forms > 1 OR non_formula_cells > 0"
+```
+
 ---
 
 ## DuckDB Friendly SQL Reference
