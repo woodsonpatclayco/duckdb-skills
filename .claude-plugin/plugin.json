@@ -1,7 +1,7 @@
 {
   "name": "duckdb-skills",
   "description": "Skills for Claude Code that use DuckDB: a lakehouse of Excel contracts materialized as DuckLake, Snowflake extracts kept as local Parquet, Excel contract checks, querying DuckDB databases and files, and reading any data file.",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "woodsonpatclayco",
     "url": "https://github.com/woodsonpatclayco"
