@@ -145,11 +145,19 @@ FROM (
 -- gates the exit code.
 -- @assert jobcosts_sum_exact_decimal: (SELECT typeof(sum(JOB_COSTS)) FROM contract_view) LIKE 'DECIMAL%'
 -- @assert vendorname_ratio_floor: (SELECT count(VENDOR_NAME)::DOUBLE / count(*) FROM contract_view) >= 0.80
--- Business rule (Phil, 2026-10-06): GL_PERIOD is blank exactly for "3 Months and
--- Older" rows (MONTH_OFFSET = -99) and filled for every other row. Measured 2026-10-06:
--- 44,610 blank, all -99; 13,167 filled, all 0/-1/-2. IS DISTINCT FROM makes a NULL
--- MONTH_OFFSET count as a violation rather than slip through.
--- @assert glperiod_null_iff_older: (SELECT count(*) FROM contract_view WHERE (GL_PERIOD IS NULL) IS DISTINCT FROM (MONTH_OFFSET = '-99')) = 0
+-- Business rule (Phil, 2026-10-06; widened 2026-10-12): rows in the Current Month / 1 / 2
+-- Months Ago buckets (MONTH_OFFSET 0/-1/-2) always carry a GL_PERIOD. Rows in the "3 Months
+-- and Older" bucket (MONTH_OFFSET = -99) carry none -- EXCEPT postings to a future period,
+-- which are legitimate (Phil, 2026-10-12) and which the source also files under -99, with
+-- their GL_PERIOD filled. Measured 2026-10-12: 44,610 blank -99 rows; 3 -99 rows dated
+-- 2026-11-01 while the current month is 2026-10-01; 14,437 filled 0/-1/-2 rows. The old
+-- rule ("blank exactly when -99") refused every refresh from 2026-10-06 on those 3 rows.
+-- "Current month" is the Current Month bucket's GL_PERIOD, or the 1 Month Ago bucket's plus
+-- one month if the current bucket is empty (early in a month). Any other MONTH_OFFSET,
+-- NULL included, is a violation (the ELSE true). Planted-defect check, 2026-10-12: an -99
+-- row dated August 2026 -> 1 violation; a current-month row with GL_PERIOD blanked -> 1.
+-- Name kept from the narrower rule so check_history stays one continuous series.
+-- @assert glperiod_null_iff_older: (WITH cur AS (SELECT coalesce(max(GL_PERIOD) FILTER (WHERE MONTH_OFFSET = '0'), (max(GL_PERIOD) FILTER (WHERE MONTH_OFFSET = '-1') + INTERVAL 1 MONTH)::DATE) AS m FROM contract_view) SELECT count(*) FROM contract_view, cur WHERE CASE WHEN MONTH_OFFSET IN ('0', '-1', '-2') THEN GL_PERIOD IS NULL WHEN MONTH_OFFSET = '-99' THEN GL_PERIOD IS NOT NULL AND GL_PERIOD <= cur.m ELSE true END) = 0
 
 -- GL_PERIOD type. any_value() is required: an un-aggregated typeof() would return one
 -- row per record and trip the one-row assertion rule.
