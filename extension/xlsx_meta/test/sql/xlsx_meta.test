@@ -1,0 +1,327 @@
+# name: test/sql/xlsx_meta.test
+# description: xlsx_meta: Excel table locations, and read_xlsx_table built on them
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT xlsx_table_sheet('test/data/tables.xlsx', 'Base_Rate');
+----
+Catalog Error: Scalar Function with name xlsx_table_sheet does not exist!
+
+require xlsx_meta
+
+# ---- discovery -------------------------------------------------------------
+
+query IITTI
+FROM xlsx_sheets('test/data/tables.xlsx');
+----
+1	Summary	visible	xl/worksheets/sheet1.xml	0
+2	Rates	visible	xl/worksheets/sheet2.xml	2
+3	Bob's Data	visible	xl/worksheets/sheet3.xml	3
+4	Hidden	hidden	xl/worksheets/sheet4.xml	0
+
+# Same rows, order and values as duckdb-skills tools/xlsx_meta.py tables (checked against it).
+# Part numbers don't follow sheet order; one rel target is absolute; totals row trimmed.
+query TTTTTIIIIT
+FROM xlsx_tables('test/data/tables.xlsx');
+----
+Base_Rate	Rates	A2:C5	A2:C5	A3:C5	3	1	0	3	[Code, Rate, Unit]
+Rate_Tiers	Rates	E2:F6	E2:F5	E3:F5	3	1	1	2	[Tier, Floor]
+NoHeader	Bob's Data	A1:B3	A1:B3	A1:B3	3	0	0	2	[Column1, Column2]
+Empty_Tbl	Bob's Data	D1:E1	D1:E1	D2:E1	0	1	0	2	[Only, Header]
+Bobs_Items	Bob's Data	G1:H3	G1:H3	G2:H3	2	1	0	2	[Item, Qty]
+
+# x:-prefixed SpreadsheetML; displayName (not name) is the table's name
+query TTTT
+SELECT table_name, sheet_name, ref, read_range FROM xlsx_tables('test/data/prefixed.xlsx');
+----
+Parts_Tbl	Parts List	B1:C3	B1:C3
+
+# ---- lookups ---------------------------------------------------------------
+
+query TT
+SELECT xlsx_table_sheet('test/data/tables.xlsx', 'Rate_Tiers'), xlsx_table_range('test/data/tables.xlsx', 'Rate_Tiers');
+----
+Rates	E2:F5
+
+# Table names compare case-insensitively, as in Excel
+query TT
+SELECT xlsx_table_sheet('test/data/tables.xlsx', 'base_RATE'), xlsx_table_range('test/data/tables.xlsx', 'BASE_RATE');
+----
+Rates	A2:C5
+
+# Refuse, don't guess
+statement error
+SELECT xlsx_table_range('test/data/tables.xlsx', 'No_Such_Table');
+----
+no table 'No_Such_Table' in test/data/tables.xlsx
+
+statement error
+SELECT xlsx_table_range('test/data/tables.xlsx', 'NoHeader');
+----
+has no header row (headerRowCount=0); refusing to guess column names
+
+statement error
+SELECT xlsx_table_range('test/data/tables.xlsx', 'Empty_Tbl');
+----
+read_xlsx_table: table Empty_Tbl has no data rows (ref D1:E1)
+
+# The sheet of a header-less table is still a fact worth reporting
+query T
+SELECT xlsx_table_sheet('test/data/tables.xlsx', 'NoHeader');
+----
+Bob's Data
+
+statement error
+FROM xlsx_tables('test/data/not_a_zip.xlsx');
+----
+not an .xlsx/.xlsm zip
+
+statement error
+FROM xlsx_tables('test/data/does_not_exist.xlsx');
+----
+does_not_exist.xlsx
+
+statement error
+FROM xlsx_tables(NULL);
+----
+path must not be NULL
+
+# NULL arguments give NULL, like other scalars
+query T
+SELECT xlsx_table_range(NULL, 'Base_Rate');
+----
+NULL
+
+# One row per input row, with several workbooks in one column
+query TT
+SELECT t, xlsx_table_range(p, t) FROM (VALUES
+	('test/data/tables.xlsx', 'Base_Rate'),
+	('test/data/prefixed.xlsx', 'Parts_Tbl'),
+	('test/data/tables.xlsx', 'Rate_Tiers')) v(p, t)
+ORDER BY t;
+----
+Base_Rate	A2:C5
+Parts_Tbl	B1:C3
+Rate_Tiers	E2:F5
+
+# ---- defined names ---------------------------------------------------------
+
+# Same rows, order and statuses as tools/xlsx_meta.py names (checked against it): definitions
+# in workbook order, hidden _xlnm.* built-ins dropped, then one 'ambiguous' row per name defined
+# on several sheets and not at workbook scope (Dup has a workbook definition, so it gets none)
+query TTTTTTTIT
+FROM xlsx_names('test/data/tables.xlsx');
+----
+Rate_Block	Rate_Block	workbook	NULL	ok	Rates	A2:C5	4	Rates!$A$2:$C$5
+Title_Cell	Title_Cell	workbook	NULL	ok	Rates	A1	1	Rates!$A$1
+Items	'Bob''s Data'!Items	sheet	Bob's Data	ok	Bob's Data	G1:H3	3	'Bob''s Data'!$G$1:$H$3
+ExternalData_1	Rates!ExternalData_1	sheet	Rates	ok	Rates	E2:F5	4	Rates!$E$2:$F$5
+ExternalData_1	'Bob''s Data'!ExternalData_1	sheet	Bob's Data	ok	Bob's Data	A1:B3	3	'Bob''s Data'!$A$1:$B$3
+Excluded_Vendors	Excluded_Vendors	workbook	NULL	broken	NULL	NULL	NULL	_xlfn.ANCHORARRAY(#REF!)
+Dyn_Range	Dyn_Range	workbook	NULL	formula	NULL	NULL	NULL	OFFSET(Rates!$A$1,0,0,5,1)
+Ghost	Ghost	workbook	NULL	formula	NULL	NULL	NULL	Gone!$A$1
+Whole_Col	Whole_Col	workbook	NULL	formula	NULL	NULL	NULL	Rates!$A:$A
+Dup	Dup	workbook	NULL	ok	Rates	A3	1	Rates!$A$3
+dup	Rates!dup	sheet	Rates	ok	Rates	B3	1	Rates!$B$3
+ExternalData_1	ExternalData_1	-	NULL	ambiguous	NULL	NULL	NULL	defined 2 times: Rates!ExternalData_1, 'Bob''s Data'!ExternalData_1
+
+query TTT
+SELECT defined_name, sheet_name, cell_range FROM xlsx_names('test/data/prefixed.xlsx');
+----
+Parts_Block	Parts List	B1:C3
+
+query TTT
+SELECT xlsx_name_sheet('test/data/tables.xlsx', 'rate_block'), xlsx_name_range('test/data/tables.xlsx', 'Rate_Block'), xlsx__name_header('test/data/tables.xlsx', 'Rate_Block');
+----
+Rates	A2:C5	true
+
+# One cell: header defaults to false
+query TT
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Title_Cell'), xlsx__name_header('test/data/tables.xlsx', 'Title_Cell');
+----
+A1	false
+
+# A sheet-scoped name answers to Sheet!Name quoted or not, and to its bare name when unique
+query TTT
+SELECT xlsx_name_range('test/data/tables.xlsx', '''Bob''''s Data''!Items'),
+       xlsx_name_range('test/data/tables.xlsx', 'bob''s data!items'),
+       xlsx_name_range('test/data/tables.xlsx', 'Items');
+----
+G1:H3	G1:H3	G1:H3
+
+# The same name on two sheets: each sheet's spelling works...
+query TT
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Rates!ExternalData_1'),
+       xlsx_name_sheet('test/data/tables.xlsx', '''Bob''''s Data''!ExternalData_1');
+----
+E2:F5	Bob's Data
+
+# ...the bare name refuses, and says how to fix it
+statement error
+SELECT xlsx_name_range('test/data/tables.xlsx', 'ExternalData_1');
+----
+read_xlsx_name: ExternalData_1 is ambiguous -- defined 2 times: Rates!ExternalData_1, 'Bob''s Data'!ExternalData_1; address it as Sheet!Name
+
+# Workbook scope AND sheet scope is not ambiguous: the bare name is the workbook one (as in
+# Excel), and the sheet-scoped one is reached by prefixing its sheet, quoted or not
+query TTT
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Dup'), xlsx_name_range('test/data/tables.xlsx', 'Rates!DUP'),
+       xlsx_name_range('test/data/tables.xlsx', '''Rates''!dup');
+----
+A3	B3	B3
+
+statement error
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Excluded_Vendors');
+----
+read_xlsx_name: Excluded_Vendors is broken: _xlfn.ANCHORARRAY(#REF!)
+
+statement error
+SELECT xlsx_name_sheet('test/data/tables.xlsx', 'Dyn_Range');
+----
+read_xlsx_name: Dyn_Range is not a plain cell range (it is OFFSET(Rates!$A$1,0,0,5,1)); formula-defined names are not resolved
+
+statement error
+SELECT xlsx__name_header('test/data/tables.xlsx', 'Ghost');
+----
+read_xlsx_name: Ghost is not a plain cell range (it is Gone!$A$1)
+
+statement error
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Whole_Col');
+----
+read_xlsx_name: Whole_Col is not a plain cell range (it is Rates!$A:$A)
+
+# Hidden built-ins are not addressable
+statement error
+SELECT xlsx_name_range('test/data/tables.xlsx', '_xlnm._FilterDatabase');
+----
+no defined name '_xlnm._FilterDatabase' in test/data/tables.xlsx
+
+statement error
+SELECT xlsx_name_range('test/data/tables.xlsx', 'Nope');
+----
+no defined name 'Nope' in test/data/tables.xlsx
+
+# ---- end to end: the read_xlsx_table macro on top of the scalars ------------
+
+require excel
+
+# The plain-SQL string builder from tools/xlsx_meta.py. It only works because the scalars
+# are not volatile, so they fold to constants inside query().
+statement ok
+CREATE MACRO xlsx__q(s) AS '''' || replace(s, '''', '''''') || '''';
+
+# read_xlsx rejects a one-cell range, which is what xlsx_name_range returns for a one-cell name
+# (it must stay 'A1': duckdb-skills' formula checks use xlsx__one_cell on it)...
+statement error
+FROM read_xlsx('test/data/tables.xlsx', sheet = 'Rates', range = 'A1', header = false);
+----
+Invalid range 'A1' specified
+
+# ...so read_xlsx_name widens it to A1:A1 -- exactly as tools/xlsx_meta.py generates it
+statement ok
+CREATE MACRO xlsx__read_range(r) AS CASE WHEN contains(r, ':') THEN r ELSE r || ':' || r END;
+
+statement ok
+CREATE MACRO read_xlsx_name(p, n, header := NULL) AS TABLE FROM query(
+	'SELECT * FROM read_xlsx(' || xlsx__q(p) || ', sheet = ' || xlsx__q(xlsx_name_sheet(p, n))
+	|| ', range = ' || xlsx__q(xlsx__read_range(xlsx_name_range(p, n))) || ', header = '
+	|| coalesce(header, xlsx__name_header(p, n))::VARCHAR || ', all_varchar = true)');
+
+statement ok
+CREATE MACRO read_xlsx_table(p, t) AS TABLE FROM query(
+	'SELECT * FROM read_xlsx(' || xlsx__q(p) || ', sheet = ' || xlsx__q(xlsx_table_sheet(p, t))
+	|| ', range = ' || xlsx__q(xlsx_table_range(p, t)) || ', header = true, all_varchar = true)');
+
+# The blank row 4 inside the table is kept: 3 rows, not 1
+query TTT
+FROM read_xlsx_table('test/data/tables.xlsx', 'Base_Rate');
+----
+A100	12.5	hr
+NULL	NULL	NULL
+A300	40	day
+
+# The wrong answers this replaces, both silent (the PLAN-6 121/130-vs-122 pattern):
+# a sheet-only read takes the title row as its header and stops at the blank row...
+query I
+SELECT count(*) FROM read_xlsx('test/data/tables.xlsx', sheet = 'Rates', all_varchar = true);
+----
+2
+
+# ...and stop_at_empty = false runs past the table to the stray value at A8
+query I
+SELECT count(*) FROM read_xlsx('test/data/tables.xlsx', sheet = 'Rates', stop_at_empty = false, all_varchar = true);
+----
+7
+
+# The totals row is trimmed, and the neighbouring table's columns are not read
+query TT
+FROM read_xlsx_table('test/data/tables.xlsx', 'rate_tiers');
+----
+Bronze	0
+Silver	1000
+Gold	5000
+
+# Column names come from the header row
+query T
+SELECT column_name FROM (DESCRIBE FROM read_xlsx_table('test/data/tables.xlsx', 'Base_Rate'));
+----
+Code
+Rate
+Unit
+
+# A sheet name with a space and an apostrophe survives the quoting
+query TT
+FROM read_xlsx_table('test/data/tables.xlsx', 'Bobs_Items');
+----
+washer	7
+rivet	9
+
+statement error
+FROM read_xlsx_table('test/data/tables.xlsx', 'NoHeader');
+----
+refusing to guess column names
+
+# Works through a view, as contracts use it
+statement ok
+CREATE VIEW tiers AS FROM read_xlsx_table('test/data/tables.xlsx', 'Rate_Tiers');
+
+query I
+SELECT count(*) FROM tiers;
+----
+3
+
+# ---- end to end: read_xlsx_name --------------------------------------------
+
+# A multi-row range: first row is the header; the blank row inside is kept
+query TTT
+FROM read_xlsx_name('test/data/tables.xlsx', 'Rate_Block');
+----
+A100	12.5	hr
+NULL	NULL	NULL
+A300	40	day
+
+# One cell: no header, the cell itself is the value
+query T
+FROM read_xlsx_name('test/data/tables.xlsx', 'Title_Cell');
+----
+Rates sheet title
+
+# header := overrides the default
+query I
+SELECT count(*) FROM read_xlsx_name('test/data/tables.xlsx', 'Rate_Block', header := false);
+----
+4
+
+# Sheet-scoped, on the quoted sheet
+query TT
+FROM read_xlsx_name('test/data/tables.xlsx', '''Bob''''s Data''!ExternalData_1', header := false);
+----
+1	2
+3	4
+5	6
+
+statement error
+FROM read_xlsx_name('test/data/tables.xlsx', 'ExternalData_1');
+----
+is ambiguous

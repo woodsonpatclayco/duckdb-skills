@@ -203,6 +203,16 @@ You can test individual skills directly:
 
 **Prerequisites:** DuckDB CLI must be installed. If it isn't, the skills will offer to install it via `/duckdb-skills:install-duckdb`.
 
+### The `xlsx_meta` C++ extension (in progress)
+
+[`extension/xlsx_meta/`](extension/xlsx_meta/README.md) is a DuckDB extension with the same
+lookups `tools/xlsx_meta.py` generates as SQL macros: `xlsx_tables` / `xlsx_names` listings and
+the `xlsx_table_*` / `xlsx_name_*` scalars that `read_xlsx_table` / `read_xlsx_name` build on.
+**The skills don't use it yet** — they keep using the Python generator. The extension is built
+on Linux (Ubuntu / WSL), and `extension/xlsx_meta/test/parity.sh` checks that the two give the
+same answers. Its `duckdb` and `extension-ci-tools` submodules are only needed to build it:
+`git submodule update --init` (see that README).
+
 ## How the skills work together
 
 Skills reference each other where it makes sense:

@@ -1,0 +1,8 @@
+[submodule "extension/xlsx_meta/duckdb"]
+	path = extension/xlsx_meta/duckdb
+	url = https://github.com/duckdb/duckdb
+	shallow = true
+[submodule "extension/xlsx_meta/extension-ci-tools"]
+	path = extension/xlsx_meta/extension-ci-tools
+	url = https://github.com/duckdb/extension-ci-tools
+	shallow = true
