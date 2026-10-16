@@ -119,4 +119,6 @@ test/parity.sh '/mnt/c/path/to/Data Extracts.xlsm' ...   # agrees with tools/xls
   Rerun it after editing the script. `tests/prove-xlsx-names.ps1` (repo root) reads the same
   fixture through the Python generator's macros on Windows.
 - `test/parity.sh <workbook>...` compares the extension with `tools/xlsx_meta.py` on real
-  workbooks (staged copies): both listings, and every lookup's value and error text.
+  workbooks (staged copies): both listings, and every lookup's value and error text. On Windows
+  (Git Bash) it tests the shipped binary in the installed DuckDB instead of a build:
+  `XLSX_META_EXT=../bin/v1.5.5/windows_amd64/xlsx_meta.duckdb_extension DUCKDB=duckdb PY='py -3.12' test/parity.sh <workbook>...`
