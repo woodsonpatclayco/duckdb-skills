@@ -1,0 +1,108 @@
+# Builds the xlsx_meta extension for Windows (windows_amd64, MSVC) against DuckDB v1.5.5,
+# runs its SQL tests on Windows, and uploads xlsx_meta.duckdb_extension as a run artifact.
+#
+# Follows the Windows job in extension-ci-tools/.github/workflows/_extension_distribution.yml.
+# That reusable workflow can't be called directly: it expects the extension at the repo root,
+# and ours lives in extension/xlsx_meta. Keep the two in step when bumping DuckDB.
+name: xlsx_meta Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'extension/xlsx_meta/**'
+      - '.github/workflows/xlsx-meta-windows.yml'
+
+concurrency:
+  group: xlsx-meta-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Windows (windows_amd64)
+    runs-on: windows-latest
+    env:
+      DUCKDB_VERSION: v1.5.5
+      DUCKDB_PLATFORM: windows_amd64
+      # vcpkg packages are only for the excel extension the tests build alongside ours.
+      VCPKG_TARGET_TRIPLET: x64-windows-static-release
+      VCPKG_HOST_TRIPLET: x64-windows-static-release
+      VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/extension/xlsx_meta/extension-ci-tools/vcpkg_ports
+      VCPKG_BINARY_SOURCES: 'clear;http,https://vcpkg-cache.duckdb.org,read'
+      USE_MERGED_VCPKG_MANIFEST: 1
+      BUILD_SHELL: 0
+      CC: cl
+      CXX: cl
+      GEN: ninja
+
+    steps:
+      - name: Keep \n line endings
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      # Without the tag, DuckDB's build calls itself v0.0.x and the extension won't load in v1.5.5.
+      - name: Tag the DuckDB submodule
+        shell: bash
+        run: |
+          git -C extension/xlsx_meta/duckdb fetch --depth 1 origin tag "$DUCKDB_VERSION"
+          test "$(git -C extension/xlsx_meta/duckdb describe --tags)" = "$DUCKDB_VERSION"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ninja
+        run: choco install ninja -y
+
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@main
+        continue-on-error: true
+        with:
+          key: ccache-xlsx-meta-${{ env.DUCKDB_PLATFORM }}-${{ env.DUCKDB_VERSION }}
+          restore-keys: ccache-xlsx-meta-${{ env.DUCKDB_PLATFORM }}-
+
+      - name: Setup shorter path for vcpkg
+        shell: pwsh
+        run: |
+          $basePath = Split-Path -Path (Split-Path -Path $env:GITHUB_WORKSPACE -Parent) -Parent
+          $vcpkgRoot = "$basePath/vcpkg"
+          echo "VCPKG_WINDOWS_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "VCPKG_TOOLCHAIN_PATH=$vcpkgRoot/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11.1
+        with:
+          vcpkgGitCommitId: 84bab45d415d22042bd0b9081aea57f362da3f35
+          vcpkgDirectory: ${{ env.VCPKG_WINDOWS_ROOT }}
+
+      - name: Build
+        shell: cmd
+        working-directory: extension/xlsx_meta
+        env:
+          EXT_FLAGS: -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        run: |
+          if exist "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars64.bat" (
+            call "C:\Program Files\Microsoft Visual Studio\18\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          ) else (
+            call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          )
+          REM Git's link.exe shadows MSVC's linker.
+          mv "C:\Program Files\Git\usr\bin\link.exe" "C:\Program Files\Git\usr\bin\link-git.exe"
+          make release
+
+      - name: Test
+        shell: bash
+        working-directory: extension/xlsx_meta
+        run: make test_release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: error
+          name: xlsx_meta-${{ env.DUCKDB_VERSION }}-extension-${{ env.DUCKDB_PLATFORM }}
+          path: extension/xlsx_meta/build/release/extension/xlsx_meta/xlsx_meta.duckdb_extension
