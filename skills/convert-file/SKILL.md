@@ -4,7 +4,9 @@ description: >
   Convert any data file to another format: CSV, Parquet, JSON, Excel, GeoJSON, and more.
   Use when the user says "convert to parquet", "save as xlsx", "export as JSON", "make this a CSV",
   "turn into parquet", or any variation of format-to-format conversion for data files.
-  Also triggers when the user wants to write Parquet, Excel, or other binary formats that Claude cannot produce natively.
+  Also triggers when the user wants to write Parquet, Excel, or other binary formats that Claude cannot produce natively,
+  and when the output is for Excel Power Query or a SharePoint share ("export for Excel", "so Power Query can read it") --
+  that writes a CSV plus a types file and a ready Power Query.
 argument-hint: <input-file> [output-file]
 allowed-tools: Bash
 ---
@@ -33,6 +35,31 @@ Infer the output format from the output file extension:
 | `.geojson` | `(FORMAT GDAL, DRIVER 'GeoJSON')` — requires `LOAD spatial;` |
 | `.gpkg` | `(FORMAT GDAL, DRIVER 'GPKG')` — requires `LOAD spatial;` |
 | `.shp` | `(FORMAT GDAL, DRIVER 'ESRI Shapefile')` — requires `LOAD spatial;` |
+
+### Output for Excel / Power Query (SharePoint)
+
+If the output is meant to be read by Excel's Power Query — the user says Excel, Power
+Query, a workbook will pull it, or it goes to a SharePoint share for Excel — do **not**
+use the table above. Run the Excel export tool instead and skip to Step 3:
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}/tools/export-excel-csv.ps1" \
+  -Source '<INPUT_PATH or .sql file or SQL text>' -OutDir '<folder>' [-Name <stem>] \
+  [-SiteUrl 'https://claycorp.sharepoint.com/sites/<site>' -FolderPath 'https://claycorp.sharepoint.com/sites/<site>/Shared Documents/<folder>/']
+```
+
+It writes `<stem>.csv`, `<stem>.types.csv` (DuckDB's `DESCRIBE`: column name and type) and
+`<stem>.pq.m`, the Power Query to paste into Excel's Advanced Editor. The query reads both
+files with `SharePoint.Files` and types every column from the types file, so it never
+hard-codes a column list. The template is `${CLAUDE_PLUGIN_ROOT}/skills/convert-file/excel-csv-sharepoint.m`.
+Upload the two CSVs to the SharePoint folder; the `.pq.m` is for the person building the workbook.
+
+Why this and not Parquet or xlsx: Excel's Power Query has no `Parquet.Document` (it fails
+with "The import Parquet.Document matches no exports"), and CSV loads fastest of what it
+can read (500k rows: CSV ~1.6 s, xlsx ~6 s, JSON array ~9 s). Tell the user two CSV limits:
+a NULL text value arrives as an empty string, and `TIMESTAMP WITH TIME ZONE` is written in
+the exporting machine's time zone. Types the M does not map (UUID, HUGEINT, INTERVAL, LIST, ...)
+load as text, and the tool's output names each one.
 
 ## Step 2 — Convert
 
