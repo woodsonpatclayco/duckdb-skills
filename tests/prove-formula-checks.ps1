@@ -11,6 +11,15 @@ committed counts in the contract stay true. Delete that file to re-stage from th
 Calculator; the live file is only ever read, through a shared read-only open.
 Finally the clean run is materialized into a scratch lake, to show the four checks land in
 check_history as invariants.
+
+The committed contract names the main checkout's staged copy by absolute path (so it also runs
+on its own). This script runs a copy of it whose path points at THIS checkout's staged copy --
+from any other checkout or worktree the committed path would read a different, clean file, and
+every planted defect would go unseen.
+
+workbook_errors is a budget (the committed count), not "no new errors", and the live workbook's
+error count drifts. So the error scenario plants as many #REF!s as it takes to go exactly one
+over the budget, counted from the clean copy each run.
 #>
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path $PSScriptRoot -Parent
@@ -18,7 +27,7 @@ Set-Location $repo
 $dir = Join-Path $repo '.duckdb-skills\formula-proof'
 $clean = Join-Path $dir 'SDI-clean.xlsx'
 $work = Join-Path $dir 'SDI.xlsx'
-$contract = Join-Path $repo 'tests\contracts\SDI_Combined_Formulas.sql'
+$committedContract = Join-Path $repo 'tests\contracts\SDI_Combined_Formulas.sql'
 $plant = Join-Path $PSScriptRoot 'plant-formula-defect.py'
 $SDIlive = 'C:\Users\woodsonp\Clayco, Inc\Profit Plans - General\Analytics\SDI Calculator\SDI Calculator Data thru Current Month.xlsx'
 New-Item -ItemType Directory -Force $dir | Out-Null
@@ -31,13 +40,41 @@ if (-not (Test-Path -LiteralPath $clean)) {
 }
 $cleanSha = (Get-FileHash -LiteralPath $clean -Algorithm SHA256).Hash
 
+# The contract, re-pointed at this checkout's staged copy. Same file name: it names the contract.
+$committedPath = 'C:/Users/woodsonp/Claude/Dev/duckdb-skills/.duckdb-skills/formula-proof/SDI.xlsx'
+$contractText = Get-Content -LiteralPath $committedContract -Raw
+if (-not $contractText.Contains("'$committedPath'")) {
+    throw "tests\contracts\SDI_Combined_Formulas.sql no longer reads '$committedPath' -- update `$committedPath here"
+}
+$contract = Join-Path $dir 'SDI_Combined_Formulas.sql'
+[IO.File]::WriteAllText($contract, $contractText.Replace("'$committedPath'", "'$($work.Replace('\', '/'))'"))
+
+# How many #REF!s take the workbook exactly one over workbook_errors' committed budget.
+if ($contractText -notmatch '(?m)^--\s*@formula_errors_max workbook_errors: \* <= (\d+)\s*$') {
+    throw 'cannot find the workbook_errors budget (@formula_errors_max workbook_errors: * <= N) in the contract'
+}
+$budget = [int]$Matches[1]
+$fcsv = Join-Path $dir 'SDI-clean.formulas.csv'
+& py -3.12 (Join-Path $repo 'tools\xlsx_meta.py') formulas $clean -o $fcsv | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'xlsx_meta.py formulas failed on the clean copy' }
+$cleanErrors = @(Import-Csv -LiteralPath $fcsv | Where-Object { $_.error }).Count
+$plantErrors = [Math]::Max(1, $budget - $cleanErrors + 1)
+# Planted down the SDI Basis column (A10:A90, 81 cells, no errors on a clean copy)
+if ($plantErrors -gt 81) {
+    throw "the clean copy has $cleanErrors error cells; reaching $($budget + 1) needs $plantErrors new ones, more than SDI Basis' 81 cells -- lower the committed budget"
+}
+$errorCells = if ($plantErrors -eq 1) { 'A40' } else { "A10:A$(9 + $plantErrors)" }
+Write-Output "The clean copy shows $cleanErrors error cells against workbook_errors' budget of $budget;"
+Write-Output "the error scenario plants $plantErrors #REF! ($errorCells) to reach $($cleanErrors + $plantErrors)."
+Write-Output ''
+
 $checks = @('sdi_basis_consistent', 'sdi_basis_formula', 'sdi_basis_errors', 'workbook_errors')
 $scenarios = @(
     @{ what = 'clean copy';                                          plant = $null;                                                                         fails = @() },
     @{ what = 'a value typed over Combined!A20';                      plant = @('A20', 'typed', '12345');                                                    fails = @('sdi_basis_consistent') },
     @{ what = 'Combined!A30 edited to read row 31 ($AG31)';           plant = @('A30', 'formula', 'INDEX(_xlfn.ANCHORARRAY(AI$10),$AG31)');                  fails = @('sdi_basis_consistent', 'sdi_basis_formula') },
     @{ what = 'whole column edited to read column AH (consistent)';   plant = @('A10:A90', 'formula', 'INDEX(_xlfn.ANCHORARRAY(AI$10),$AH{row})');           fails = @('sdi_basis_formula') },
-    @{ what = 'one extra #REF! at Combined!A40';                      plant = @('A40', 'error', '#REF!');                                                    fails = @('sdi_basis_errors', 'workbook_errors') },
+    @{ what = "$plantErrors #REF! at Combined!$errorCells (one over budget)"; plant = @($errorCells, 'error', '#REF!');                                        fails = @('sdi_basis_errors', 'workbook_errors') },
     @{ what = 'clean copy again';                                    plant = $null;                                                                         fails = @() }
 )
 
