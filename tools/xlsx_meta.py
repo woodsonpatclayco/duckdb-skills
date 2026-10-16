@@ -8,7 +8,8 @@ read_xlsx_table(path, 'Tbl') and get exactly that table's rows (PLAN-6 item 1).
 Subcommands:
   tables <workbook>            one row per table: name, sheet, ref, data range, header/totals rows, columns
   names  <workbook>            one row per defined name, plus one 'ambiguous' row per bare name that
-                               is defined more than once; hidden _xlnm.* built-ins excluded
+                               is defined on several sheets and not at workbook scope; hidden
+                               _xlnm.* built-ins excluded
   macros <workbook>... [-o F] [--formulas]
                                SQL defining xlsx_table_sheet/_range, read_xlsx_table,
                                xlsx_name_sheet/_range, read_xlsx_name for the given workbooks;
@@ -183,7 +184,9 @@ class Workbook:
 
     def names(self):
         """Per definition: dict(address, name, scope, sheet, range, rows, status, detail).
-        Plus one 'ambiguous' row for each bare name defined more than once."""
+        Plus one 'ambiguous' row for each bare name defined more than once with no workbook-scoped
+        definition. When a name exists at workbook scope, the bare name means that one (as in
+        Excel); its sheet-scoped namesakes are reached as Sheet!Name, so nothing is ambiguous."""
         rows = []
         for name, lsid, text, hidden in self.defined:
             if name.startswith("_xlnm."):
@@ -200,7 +203,7 @@ class Workbook:
         for r in rows:
             by_name.setdefault(r["name"].lower(), []).append(r)
         for key, defs in by_name.items():
-            if len(defs) > 1:
+            if len(defs) > 1 and not any(d["scope"] == "workbook" for d in defs):
                 where = ", ".join(d["address"] for d in defs)
                 rows.append({"name": defs[0]["name"], "scope": "-", "scope_sheet": "",
                              "address": defs[0]["name"], "sheet": "", "range": "", "rows": "",
@@ -512,7 +515,10 @@ def name_keys(row):
     """Every spelling that addresses this definition, lowercased."""
     if row["status"] == "ambiguous" or not row["scope_sheet"]:
         return [row["name"].lower()]
-    keys = {row["address"].lower(), (row["scope_sheet"] + "!" + row["name"]).lower()}
+    sheet = row["scope_sheet"]
+    # Excel's spelling, plus the sheet unquoted and always-quoted ('Rates'!Name is valid Excel)
+    keys = {row["address"].lower(), (sheet + "!" + row["name"]).lower(),
+            ("'" + sheet.replace("'", "''") + "'!" + row["name"]).lower()}
     return sorted(keys)
 
 
@@ -607,6 +613,10 @@ def cmd_macros(a):
                    "error('no sheet ''' || s || ''' in ' || p)"),
         "CREATE OR REPLACE MACRO xlsx__one_cell(n, r) AS CASE WHEN contains(r, ':') THEN "
         "error('named range ' || n || ' is ' || r || ', not one cell') ELSE r END;",
+        # read_xlsx rejects a one-cell range ('A1': "Invalid range"), but xlsx_name_range must keep
+        # returning 'A1' -- xlsx__one_cell above depends on it -- so the read widens it to A1:A1.
+        "CREATE OR REPLACE MACRO xlsx__read_range(r) AS CASE WHEN contains(r, ':') THEN r "
+        "ELSE r || ':' || r END;",
         # range= is sheet-relative and switches stop_at_empty off, so the read is exactly the
         # table's rectangle: header row through the last data row (totals row trimmed).
         "CREATE OR REPLACE MACRO read_xlsx_table(p, t) AS TABLE FROM query("
@@ -615,7 +625,7 @@ def cmd_macros(a):
         # header defaults from geometry: a one-row range has nothing below a header to read.
         "CREATE OR REPLACE MACRO read_xlsx_name(p, n, header := NULL) AS TABLE FROM query("
         "'SELECT * FROM read_xlsx(' || xlsx__q(p) || ', sheet = ' || xlsx__q(xlsx_name_sheet(p, n))"
-        " || ', range = ' || xlsx__q(xlsx_name_range(p, n)) || ', header = '"
+        " || ', range = ' || xlsx__q(xlsx__read_range(xlsx_name_range(p, n))) || ', header = '"
         " || coalesce(header, xlsx__name_header(p, n))::VARCHAR || ', all_varchar = true)');",
     ]
     formula_note = ""

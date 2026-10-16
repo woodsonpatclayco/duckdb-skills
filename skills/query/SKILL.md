@@ -185,7 +185,9 @@ duckdb -csv -c ".read '$MACROS'" -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers
   range, row count per table) and `... names "$WB"` (named ranges, with a status).
 - Every column comes back VARCHAR (`all_varchar = true`); cast explicitly.
 - A named range that exists on several sheets must be written `Sheet!Name`
-  (`'Sheet With Spaces'!Name`); bare, it is refused as ambiguous. Names pointing at `#REF!`
+  (`'Sheet With Spaces'!Name`); bare, it is refused as ambiguous — unless one of them is
+  workbook-scoped, which the bare name then means (as in Excel); the sheet-scoped ones are
+  still reached as `Sheet!Name`. Names pointing at `#REF!`
   or defined by a formula are refused with the formula shown. Pass these errors to the user
   as they are — never fall back to a sheet read.
 
