@@ -112,14 +112,36 @@ def read_rels(z, part):
     return out
 
 
+def open_shared(path):
+    """Open read-only. On Windows, share read, write AND delete, as DuckDB does: Python's own
+    open() leaves out delete-sharing, so it fails with PermissionError on a workbook that Excel
+    or OneDrive holds open with delete access (the live SDI Calculator, 2026-10-20)."""
+    if os.name != "nt":
+        return open(path, "rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    GENERIC_READ, SHARE_ALL, OPEN_EXISTING = 0x80000000, 0x7, 3
+    h = k32.CreateFileW(path, GENERIC_READ, SHARE_ALL, None, OPEN_EXISTING, 0, None)
+    if h == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.fdopen(msvcrt.open_osfhandle(h, os.O_RDONLY | os.O_BINARY), "rb")
+
+
 class Workbook:
     def __init__(self, path):
         if not os.path.isfile(path):
             raise SystemExit(f"ERROR: workbook not found: {path}")
         self.path = os.path.abspath(path)
+        self._fp = open_shared(self.path)
         try:
-            self.z = zipfile.ZipFile(self.path, "r")
+            self.z = zipfile.ZipFile(self._fp, "r")
         except zipfile.BadZipFile:
+            self._fp.close()
             raise SystemExit(f"ERROR: not an .xlsx/.xlsm zip (an .xls or .xlsb?): {self.path}")
         if "xl/workbook.xml" not in self.z.namelist():
             raise SystemExit(f"ERROR: no xl/workbook.xml in {self.path}")
@@ -127,6 +149,7 @@ class Workbook:
 
     def close(self):
         self.z.close()
+        self._fp.close()
 
     def _load(self):
         wb = ET.fromstring(self.z.read("xl/workbook.xml"))

@@ -2,6 +2,34 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-10-20 — SDI Calculator contract with formula checks (v0.6.1)
+
+**The feature:** the first real contract with formula checks, `contracts/SDI_Combined_SDI_Data.sql`.
+It guards the SDI Calculator's Combined_SDI_Data table, the source of the month's SDI journal
+entry: the posting and earnings columns keep one formula on every row, the posting formula is
+still the committed one, and error cells don't grow.
+
+**Before / after:** before, no contract in `contracts/` checked formulas, and `xlsx_meta.py`
+failed with `PermissionError` on the live SDI workbook whenever Excel or OneDrive held it open
+(DuckDB could read it). After, `run-assertions` on the contract prints 11 checks, all `PASS`:
+81 rows, six columns with one formula each, `errors 5 (max 5)` in the table, and
+`errors 722 (max 722)` in the workbook.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tools\run-assertions.ps1 -Contract contracts\SDI_Combined_SDI_Data.sql
+
+The last line should read `SUMMARY,contracts=1,assertions=11,failures=0`.
+
+**What deliberately did not change:**
+- **Insurance_Basis's bonds column is not checked yet.** It mixes formulas, typed values and
+  blanks, and that waits on Phil's decision. The contract says what to add afterwards.
+- **No checks on Not_to_Exceed_SDI or Final_Pay_App_Adjs.** They are hand-entered override
+  tables, not formula columns.
+- **The view stays all VARCHAR.** Casts belong in queries for now.
+- **A line like `--   @formula_consistent ...` is live even inside a comment block.** The
+  runners match `-- @` at any indentation. Write a parked check without the at-sign.
+
 ## 2026-10-20 — Excel tables and named ranges through the xlsx_meta extension (v0.6.0)
 
 **The feature:** reading an Excel table or named range by name (`read_xlsx_table` /
