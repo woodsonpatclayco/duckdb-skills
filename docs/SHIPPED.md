@@ -2,6 +2,46 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-10-20 — Excel tables and named ranges through the xlsx_meta extension (v0.6.0)
+
+**The feature:** reading an Excel table or named range by name (`read_xlsx_table` /
+`read_xlsx_name`) now goes through the C++ `xlsx_meta` DuckDB extension, built for Windows,
+instead of generating macros with Python on every call. When the extension can't load, the
+Python route takes over automatically. Plan: `docs/plans/2026-10-20-xlsx-meta-windows/`.
+
+**Before / after:** before, every by-name read first ran `py -3.12 tools\xlsx_meta.py macros`
+to generate SQL for that one workbook. After, the plugin ships
+`extension\bin\v1.5.5\windows_amd64\xlsx_meta.duckdb_extension`, built by GitHub Actions, and
+the skills `LOAD` it with one fixed macros file (`tools\xlsx_meta_macros.sql`) that works for
+any workbook path. On `Job_Rate_Tiers` in Data Extracts.xlsm, both routes return the same 105
+rows with the same content hash. `run-assertions`/`check-contract` output is identical line for
+line. On seven real workbooks, the extension and the generator agree on every table and name
+listing and on 3,127 lookups.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\prove-xlsx-meta-route.ps1
+
+It prints which route each mode took (the extension path vs `python generator`), the two
+contract-check comparisons (`identical`), the scratch-lake row counts (105 both ways), and
+`RESULT: PASS`.
+
+**What deliberately did not change:**
+- **Formulas stay on Python.** `read_xlsx_formulas` and the `@formula_*` checks always run
+  `xlsx_meta.py macros --formulas`; formula extraction was never ported to the extension.
+- **The Python generator stays, unchanged.** It is the fallback for any DuckDB other than
+  v1.5.5, and `DSK_XLSX_META=python` forces it. Don't delete it.
+- **Sheet contracts are untouched.** They never load the extension, and their freshness key
+  is the same (`tests\prove-contract-tables.ps1` still passes).
+- **By-name contracts re-materialize once** the first time they run on 0.6.0. The extension
+  binary's SHA-256 is now part of their freshness key, on purpose.
+- **Unsigned, and only for Windows x64 / DuckDB v1.5.5.** There is no signing, no community-
+  extension publishing, and no Linux or macOS binary in the plugin. After a DuckDB upgrade,
+  run the workflow for the new version and `tools\fetch-xlsx-meta.ps1`; until then the Python
+  route serves.
+- **`-unsigned` is passed only to the duckdb calls that read the macros file**, and only once
+  the extension route is taken.
+
 ## 2026-10-16 — Excel-ready CSV export with a types file (v0.5.0)
 
 **The feature:** export any DuckDB data (a file, a `.sql` file, or SQL text) as a CSV that

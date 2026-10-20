@@ -203,15 +203,27 @@ You can test individual skills directly:
 
 **Prerequisites:** DuckDB CLI must be installed. If it isn't, the skills will offer to install it via `/duckdb-skills:install-duckdb`.
 
-### The `xlsx_meta` C++ extension (in progress)
+### The `xlsx_meta` C++ extension
 
 [`extension/xlsx_meta/`](extension/xlsx_meta/README.md) is a DuckDB extension with the same
 lookups `tools/xlsx_meta.py` generates as SQL macros: `xlsx_tables` / `xlsx_names` listings and
 the `xlsx_table_*` / `xlsx_name_*` scalars that `read_xlsx_table` / `read_xlsx_name` build on.
-**The skills don't use it yet** — they keep using the Python generator. The extension is built
-on Linux (Ubuntu / WSL), and `extension/xlsx_meta/test/parity.sh` checks that the two give the
-same answers. Its `duckdb` and `extension-ci-tools` submodules are only needed to build it:
-`git submodule update --init` (see that README).
+The `query` skill and the contract tools use it whenever the running DuckDB can load it, and
+fall back to the Python generator otherwise. Formula reads always use the generator.
+
+- **Where the binary comes from.** The plugin ships a Windows build at
+  `extension/bin/<duckdb version>/windows_amd64/xlsx_meta.duckdb_extension`. It is built by
+  GitHub Actions (`.github/workflows/xlsx-meta-windows.yml`) on every push that touches the
+  extension. `tools/fetch-xlsx-meta.ps1` downloads the newest build into that folder; commit it.
+- **One DuckDB version only.** An extension loads only in the DuckDB version it was built for
+  (v1.5.5 today). After a DuckDB upgrade the skills quietly use the Python generator until a
+  build for the new version is committed. To build one, bump the `duckdb` submodule and
+  `DUCKDB_VERSION` in the workflow.
+- **Unsigned.** It loads only under `duckdb -unsigned`. The skills pass that flag themselves.
+- **Checks.** `extension/xlsx_meta/test/parity.sh` checks that the extension and the generator
+  agree on real workbooks. `tests/prove-xlsx-meta-route.ps1` checks that both routes give a
+  contract the same result. The `duckdb` and `extension-ci-tools` submodules are only needed
+  to build locally: `git submodule update --init` (see that README).
 
 ## How the skills work together
 
