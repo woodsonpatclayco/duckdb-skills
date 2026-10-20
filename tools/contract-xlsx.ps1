@@ -53,9 +53,47 @@ function Test-ContractNeedsFormulas([string]$RawText) {
            ($RawText -match '(?i)read_xlsx_formulas\(')
 }
 
-# Runs `py -3.12 xlsx_meta.py macros <workbooks...> -o <OutFile> [--formulas]`. Returns $null
+# PLAN-7: the xlsx_meta extension, when this DuckDB can load it. The shipped binary
+# (extension\bin\<version>\windows_amd64) loads only in the exact DuckDB version it was built
+# for, so a different DuckDB, a missing file or a failed LOAD all mean $null: the callers
+# then use the Python generator exactly as before. DSK_XLSX_META=python forces that too.
+# Decided once per process: it costs two duckdb starts.
+$XlsxMetaMacrosPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'xlsx_meta_macros.sql'))
+$XlsxDuckdbArgs = @()   # becomes -unsigned once a macros file LOADs the (unsigned) extension
+$XlsxMetaExtResolved = $null
+function Get-XlsxMetaExtension {
+    if ($null -ne $script:XlsxMetaExtResolved) { return $script:XlsxMetaExtResolved[0] }
+    $found = $null
+    if ($env:DSK_XLSX_META -ne 'python') {
+        $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        $ver = ((& duckdb -noheader -list -c 'SELECT version()' 2>&1) | Select-Object -First 1)
+        $path = Join-Path (Split-Path -Parent $PSScriptRoot) "extension\bin\$ver\windows_amd64\xlsx_meta.duckdb_extension"
+        if ($ver -match '^v[\d.]+$' -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $lit = ($path -replace '\\', '/') -replace "'", "''"
+            & duckdb -unsigned -c "LOAD '$lit'" 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $found = [System.IO.Path]::GetFullPath($path) }
+        }
+        $ErrorActionPreference = $prevEap
+    }
+    $script:XlsxMetaExtResolved = @($found)
+    return $found
+}
+
+# Writes the file that defines read_xlsx_table / read_xlsx_name for the callers to .read.
+# Without -Formulas, and when Get-XlsxMetaExtension finds a loadable build: LOAD it plus
+# tools\xlsx_meta_macros.sql, and set $XlsxDuckdbArgs to -unsigned for the duckdb calls that
+# .read it. Otherwise (formula checks were never ported to the extension) it runs
+# `py -3.12 xlsx_meta.py macros <workbooks...> -o <OutFile> [--formulas]`. Returns $null
 # on success, else the generator's own error text (it names the workbook it could not read).
 function New-XlsxMacrosFile([string[]]$WorkbookPaths, [string]$OutFile, [switch]$Formulas) {
+    $ext = if ($Formulas) { $null } else { Get-XlsxMetaExtension }
+    if ($ext) {
+        $lit = ($ext -replace '\\', '/') -replace "'", "''"
+        $text = "LOAD '$lit';`n" + [System.IO.File]::ReadAllText($XlsxMetaMacrosPath)
+        [System.IO.File]::WriteAllText($OutFile, $text, (New-Object System.Text.UTF8Encoding($false)))
+        $script:XlsxDuckdbArgs = @('-unsigned')
+        return $null
+    }
     $winPaths = @($WorkbookPaths | ForEach-Object { $_ -replace '/', '\' })
     $extra = @(); if ($Formulas) { $extra = @('--formulas') }
     $prevEap = $ErrorActionPreference

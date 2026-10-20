@@ -168,6 +168,13 @@ $compatSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $compatFullPath).Ha
 # The generator is xlsx_meta.py plus the R1C1 converter it imports (PLAN-6 item 3).
 $xlsxMetaSha256 = (@($XlsxMetaPath, (Join-Path $PSScriptRoot 'xlsx_r1c1.py')) |
     ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() }) -join '+'
+# PLAN-7: when the xlsx_meta extension serves those reads instead, its binary and macros file
+# are folded in too, so a rebuilt extension (or a switch between it and the generator) re-runs them.
+$xlsxMetaExt = Get-XlsxMetaExtension
+if ($xlsxMetaExt) {
+    $xlsxMetaSha256 += '+' + ((@($xlsxMetaExt, $XlsxMetaMacrosPath) |
+        ForEach-Object { (Get-FileHash -Algorithm SHA256 -LiteralPath $_).Hash.ToLowerInvariant() }) -join '+')
+}
 $foldedBytes = [System.Text.Encoding]::ASCII.GetBytes("$compatSha256+$xlsxMetaSha256")
 $compatPlusXlsxSha256 = ([BitConverter]::ToString(
     [System.Security.Cryptography.SHA256]::Create().ComputeHash($foldedBytes)) -replace '-', '').ToLowerInvariant()
@@ -213,7 +220,7 @@ function Invoke-DuckdbBatch {
         [System.IO.File]::WriteAllText($f, $body, $utf8NoBom)
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $out = & duckdb -f $f 2>&1
+        $out = & duckdb @XlsxDuckdbArgs -f $f 2>&1
         $exit = $LASTEXITCODE
         $ErrorActionPreference = $prevEap
         $lines = @($out | ForEach-Object { [string]$_ })

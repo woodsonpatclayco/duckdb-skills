@@ -215,7 +215,7 @@ try {
         # $LASTEXITCODE -- not the presence of stderr text -- is what is gated on.
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
-        $rawOutput = & duckdb -json -f $sqlFile 2>&1
+        $rawOutput = & duckdb @XlsxDuckdbArgs -json -f $sqlFile 2>&1
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevEap
 

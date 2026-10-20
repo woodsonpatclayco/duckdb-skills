@@ -77,6 +77,11 @@ generator's SHA-256 is folded into the same `compat_sha256` value, so a change t
 generator re-materializes them; sheet contracts keep exactly the key they had. Their
 truncation and consistency checks read the table's own rectangle, reported as a
 `SOURCE,table,<name>,<sheet>!<range>` line. Example: `contracts/Job_Rate_Tiers.sql`.
+When the running DuckDB can load the plugin's `xlsx_meta` extension
+(`extension/bin/<version>/windows_amd64/`), those two functions come from it instead
+(`tools/contract-xlsx.ps1`, `Get-XlsxMetaExtension`), and the binary's SHA-256 is folded into
+the key as well, so switching between the extension and the generator re-materializes once.
+Formula checks always use the generator. `DSK_XLSX_META=python` forces the generator.
 
 The workbook hash is read via DuckDB (`sha256(content) FROM read_blob(...)`),
 never `Get-FileHash`: confirmed this session that on a `FileShare.None`-locked

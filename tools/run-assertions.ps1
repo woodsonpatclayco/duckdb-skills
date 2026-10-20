@@ -516,7 +516,7 @@ foreach ($cf in $contractFiles) {
             $resolveFile = Join-Path $scratchDir 'resolve.sql'
             [System.IO.File]::WriteAllText($resolveFile, $resolveSql, $utf8NoBom)
             $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            $resolveOutput = @(& duckdb -f $resolveFile 2>&1 | ForEach-Object { [string]$_ })
+            $resolveOutput = @(& duckdb @XlsxDuckdbArgs -f $resolveFile 2>&1 | ForEach-Object { [string]$_ })
             $resolveExit = $LASTEXITCODE
             $ErrorActionPreference = $prevEap
             if ($resolveExit -ne 0 -or $resolveOutput.Count -lt 1) {
@@ -631,7 +631,7 @@ foreach ($cf in $contractFiles) {
         [System.IO.File]::WriteAllText($bodyFile, $body.ToString(), $utf8NoBom)
 
         $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        $phase2Output = & duckdb -f $bodyFile 2>&1
+        $phase2Output = & duckdb @XlsxDuckdbArgs -f $bodyFile 2>&1
         $phase2Exit = $LASTEXITCODE
         $ErrorActionPreference = $prevEap
 
@@ -757,7 +757,7 @@ foreach ($cf in $contractFiles) {
             $fcFile = Join-Path $scratchDir "formula-$($fc.Name).sql"
             [System.IO.File]::WriteAllText($fcFile, ".mode csv`r`n.headers on`r`n$xlsxRead$($q.Sql)`r`n", $utf8NoBom)
             $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-            $fcOut = @(& duckdb -f $fcFile 2>&1 | ForEach-Object { [string]$_ })
+            $fcOut = @(& duckdb @XlsxDuckdbArgs -f $fcFile 2>&1 | ForEach-Object { [string]$_ })
             $fcExit = $LASTEXITCODE
             $ErrorActionPreference = $prevEap
             $totalAssertions++

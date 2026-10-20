@@ -169,20 +169,31 @@ per project (see "Running the tools"). `xl_date(serial)` then returns a `DATE`. 
 Excel table (ListObject) or a named range, and a sheet-only read of a sheet holding a table
 can silently stop early (at a blank row) or run past the table's end — both exit 0. When the
 user names a table or named range, or a sheet holds more than one table, use
-`read_xlsx_table(path, table)` / `read_xlsx_name(path, name)` instead. They are SQL macros
-generated from the workbook by `tools/xlsx_meta.py` **in the same call** — never put a
-`.read` of them in `state.sql`, which would serve whatever workbook was generated last:
+`read_xlsx_table(path, table)` / `read_xlsx_name(path, name)` instead.
+
+They come from the plugin's `xlsx_meta` DuckDB extension, which ships built for one DuckDB
+version (`extension/bin/<version>/windows_amd64/`). It is unsigned, so every call that loads it
+needs `duckdb -unsigned`. When the running DuckDB has no matching build, fall back to macros
+that `tools/xlsx_meta.py` generates from the workbook **in the same call**; never put a `.read`
+of those in `state.sql`, which would serve whatever workbook was generated last:
 
 ```bash
 WB='C:/path/to/Data Extracts.xlsm'
-MACROS="$(mktemp --suffix=.sql)"
-command -v cygpath > /dev/null && MACROS="$(cygpath -m "$MACROS")"   # Git Bash: DuckDB needs a Windows path
-py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py" macros "$WB" -o "$MACROS" > /dev/null
-duckdb -csv -c ".read '$MACROS'" -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers') LIMIT 5"
+EXT="${CLAUDE_PLUGIN_ROOT}/extension/bin/$(duckdb -noheader -list -c 'SELECT version()')/windows_amd64/xlsx_meta.duckdb_extension"
+if duckdb -unsigned -c "LOAD '$EXT'" 2> /dev/null; then
+  XL=(duckdb -unsigned -cmd "LOAD '$EXT'" -cmd ".read '${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta_macros.sql'")
+else   # no build for this DuckDB version: the Python generator
+  MACROS="$(mktemp --suffix=.sql)"
+  command -v cygpath > /dev/null && MACROS="$(cygpath -m "$MACROS")"   # Git Bash: DuckDB needs a Windows path
+  py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py" macros "$WB" -o "$MACROS" > /dev/null
+  XL=(duckdb -cmd ".read '$MACROS'")
+fi
+"${XL[@]}" -csv -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers') LIMIT 5"
 ```
 
-- Discover what is there first: `py -3.12 .../xlsx_meta.py tables "$WB"` (name, sheet,
-  range, row count per table) and `... names "$WB"` (named ranges, with a status).
+- Discover what is there first. With the extension: `"${XL[@]}" -c "FROM xlsx_tables('$WB')"`
+  (name, sheet, range, row count per table) and `... "FROM xlsx_names('$WB')"` (named ranges,
+  with a status). Without it: `py -3.12 -X utf8 .../xlsx_meta.py tables "$WB"` / `... names "$WB"`.
 - Every column comes back VARCHAR (`all_varchar = true`); cast explicitly.
 - A named range that exists on several sheets must be written `Sheet!Name`
   (`'Sheet With Spaces'!Name`); bare, it is refused as ambiguous — unless one of them is
@@ -191,8 +202,9 @@ duckdb -csv -c ".read '$MACROS'" -c "FROM read_xlsx_table('$WB', 'Job_Rate_Tiers
   or defined by a formula are refused with the formula shown. Pass these errors to the user
   as they are — never fall back to a sheet read.
 
-**Excel formulas.** `read_xlsx` returns cached values only, never formula text. Add
-`--formulas` to the `macros` call above and the same `.read` also defines
+**Excel formulas.** `read_xlsx` returns cached values only, never formula text. The extension
+doesn't read formulas, so this always uses the Python generator. Add `--formulas` to its
+`macros` call above, and the same `.read` also defines
 `read_xlsx_formulas(path)`: one row per formula cell, per cell showing an error (formula or
 not — query-written `#N/A` values included), and per non-formula cell (typed value or blank)
 inside a table column that has formulas. Columns: `sheet, cell, row, col, table_name,
@@ -203,6 +215,8 @@ R1C1 form on every row), `cached_value, error`. It streams every sheet, so only 
 are not one consistent formula:
 
 ```bash
+MACROS="$(mktemp --suffix=.sql)"
+command -v cygpath > /dev/null && MACROS="$(cygpath -m "$MACROS")"
 py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/xlsx_meta.py" macros "$WB" --formulas -o "$MACROS" > /dev/null
 duckdb -csv -c ".read '$MACROS'" -c "
   SELECT table_name, table_column, count(DISTINCT formula_r1c1) AS forms,
