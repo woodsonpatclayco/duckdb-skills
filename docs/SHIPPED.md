@@ -2,6 +2,40 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-11-05 — Contracts read Excel headers with line breaks (v0.6.2)
+
+**The feature:** a contract can use a table whose header cells hold a line break (Alt+Enter)
+as its data source, and multi-line check details arrive whole. Found by the Project Profit
+data quality checks (risk-reserve repo), whose Risk_Reserve_Summary has 19 such headers.
+
+**Before / after:** on a frozen copy of Project Profit 26-10 October with the contract's
+`@table` switched to `Risk_Reserve_Summary`, v0.6.1 printed
+`ERROR,...,Binder Error: Referenced column ""Current Revenue JDE" not found` and skipped every
+formula check. v0.6.2 prints no ERROR line and runs all 120 checks: 112 PASS, 8 FAIL, which are
+the workbook's own findings (typed-over Summary cells, B6 blank, C244/C245 `#REF!`). Details that
+used to stop at a line break (a DuckDB error's `LINE 1:` context, a two-line formula) now print
+whole on one line, joined with ` | `.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\prove-linebreak-headers.ps1
+
+Expect `RESULT: PASS`, preceded by the old code's Binder Error and the new code's
+`FINGERPRINT,MATCH` and `calc_consistent` FAIL naming only E4.
+
+**What deliberately did not change:**
+- **Output is byte-identical for every contract without line-break headers.** The proof
+  compares old and new on all 5 contracts in `contracts\`, and on NULL, empty and non-ASCII
+  values.
+- **A line break is written as `\n`** in `@fingerprint`, `@snapshot_committed` and `@anchor`.
+  The lake table keeps the real names.
+- **The risk-reserve contract still uses `Combined_Project_Details`.** Switching it is a change
+  in that repo.
+- **`xlsx_meta.py`'s two gaps are not fixed here:** it counts empty spill placeholders as
+  formulas, and it drops an array formula's range.
+- **`prove-contract-tables.ps1` still calls plain `tar`.** It fails when run from Git Bash
+  (GNU tar reads `C:` as a host) but works from PowerShell. The new proof calls Windows' tar.exe.
+
 ## 2026-10-20 — SDI Calculator contract with formula checks (v0.6.1)
 
 **The feature:** the first real contract with formula checks, `contracts/SDI_Combined_SDI_Data.sql`.
