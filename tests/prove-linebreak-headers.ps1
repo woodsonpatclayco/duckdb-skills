@@ -199,7 +199,7 @@ $a = Run "$old\tools\run-assertions.ps1" @('-Contract', $acc)
 $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $acc)
 $b | Where-Object { $_ -like 'FINGERPRINT_OBSERVED,*' -or $_ -like 'SNAPSHOT*' } | ForEach-Object { Write-Output "      $_" }
 $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
-Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("this console (code page {0}): {1} lines old, {2} new, identical" -f [Console]::OutputEncoding.CodePage, $a.Count, $b.Count)
+Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("this console (code page {0}): {1} lines old, {2} new, {3}" -f [Console]::OutputEncoding.CodePage, $a.Count, $b.Count, $(if ($diff.Count) { "$($diff.Count) differ" } else { 'identical' }))
 $orig = $null
 try { $orig = [Console]::OutputEncoding.CodePage } catch { }
 if ($orig) {
@@ -210,7 +210,7 @@ if ($orig) {
     $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
     $verdict = ($b | Where-Object { $_ -like 'ERROR,*' -or $_ -like 'FINGERPRINT,*' } | Select-Object -First 1)
     if ($verdict.Length -gt 90) { $verdict = $verdict.Substring(0, 90) + '...' }
-    Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("code page 437: {0} lines old, {1} new, identical (both: {2})" -f $a.Count, $b.Count, $verdict)
+    Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("code page 437: {0} lines old, {1} new, {2} (new: {3})" -f $a.Count, $b.Count, $(if ($diff.Count) { "$($diff.Count) differ" } else { 'identical' }), $verdict)
 } else {
     Write-Output '   SKIP  code page 437: this process has no console to switch'
 }
@@ -223,7 +223,7 @@ $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $nulls)
 Show "old code ($Baseline):" @($a | Where-Object { $_ -like 'SNAPSHOT*' })
 Show 'new code:' @($b | Where-Object { $_ -like 'SNAPSHOT*' })
 $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
-Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("{0} lines old, {1} new, identical" -f $a.Count, $b.Count)
+Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("{0} lines old, {1} new, {2}" -f $a.Count, $b.Count, $(if ($diff.Count) { "$($diff.Count) differ" } else { 'identical' }))
 Check (($b -ccontains 'SNAPSHOT,none_max,NULL') -and ($b -ccontains 'SNAPSHOT,empty_text,') -and -not ($b | Where-Object { $_ -like 'SNAPSHOT_DRIFT,*' })) 'new code: NULL prints as NULL, empty as empty, and neither drifts from its committed value'
 
 # --- 7. materialize ----------------------------------------------------------------------------
