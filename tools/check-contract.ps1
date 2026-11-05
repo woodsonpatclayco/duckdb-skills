@@ -274,10 +274,19 @@ try {
     Remove-Item -LiteralPath $scratchDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# One result per output line, always: a detail holding line breaks (a DuckDB error message, a
+# non-boolean value with a line break in it) prints its lines joined by " | ", blank lines
+# dropped. run-assertions.ps1 reads this output line by line, and cut such a detail at its
+# first line break. A detail without a line break prints exactly as it always did.
+function ConvertTo-OneLineDetail([string]$Text) {
+    if ($Text -notmatch '[\r\n]') { return $Text }
+    return ((($Text -split '\r\n|\r|\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) -join ' | ')
+}
+
 $anyFailure = $false
 foreach ($r in $results) {
     if ($r.Detail) {
-        Write-Output "$($r.Status) $($r.Name): $($r.Detail)"
+        Write-Output "$($r.Status) $($r.Name): $(ConvertTo-OneLineDetail $r.Detail)"
     } else {
         Write-Output "$($r.Status) $($r.Name)"
     }

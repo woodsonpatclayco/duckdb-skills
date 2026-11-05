@@ -150,6 +150,25 @@ assertion's expression to recover it -- a second evaluation would be a second
 source of truth. `${CLAUDE_PLUGIN_ROOT}/tools/lake-status.ps1 -History <contract>` prints an explicit
 note on every such row for this reason.
 
+## Headers with a line break -- `@fingerprint` writes it as `\n`
+
+`-- @fingerprint: <col1>|<col2>|...` restates the view's column names, in order. An Excel
+header typed with Alt+Enter holds a line break, and a directive is one line, so write each
+line break as the two characters `\n` (CR, LF and CRLF alike):
+
+```sql
+-- @fingerprint: Job\nNumber|Current Revenue JDE\n(JVs 100%)|Amount
+```
+
+`FINGERPRINT_OBSERVED` and `SNAPSHOT,<name>,<value>` print a line break the same way, and a
+`@snapshot_committed` value is written the same way. A name without a line break is written
+as-is, so existing fingerprints are unchanged. The checks themselves read such headers whole
+(the raw-column completeness check names every column, line breaks included), and the lake
+table keeps the real names. In an `@assert`/`@snapshot` expression, which is one line too,
+reach such a column with `COLUMNS('^Job\sNumber$')` (`\s` matches the line break), or rename it
+in the view. An assertion's multi-line detail (a DuckDB error, say) prints on one line, its
+lines joined by ` | `.
+
 ## Formula checks -- `@formula_consistent`, `@formula_errors_max`, `@formula_fingerprint`
 
 DuckDB reads only the values Excel cached, never formulas. These three named directives

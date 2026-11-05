@@ -43,8 +43,9 @@ a per-contract one).
 Every DuckDB invocation is a fresh `duckdb -f <file>` process -- there is no
 persistent session across them, so every one re-issues its own `LOAD ducklake;`
 and `ATTACH ...;`. Bundled queries use `.mode csv` / `.headers off` with a literal
-label as the first field per result line (the same idiom tools\run-assertions.ps1
-uses for its own phase-2 batch), parsed with a fixed-count `-split ',', n` --
+label as the first field per result line (the idiom tools\run-assertions.ps1 used for
+its own phase-2 batch until 0.6.2, when it moved to one JSON pair per line because its
+values -- column names, snapshot values -- can hold line breaks), parsed with a fixed-count `-split ',', n` --
 never a full CSV parser -- because every field this script asks DuckDB to print
 back (hashes, timestamps, booleans, integers, PASS/FAIL/DRIFT/MATCH tokens) is by
 construction comma-free and quote-free. Fields that are NOT guaranteed comma-free

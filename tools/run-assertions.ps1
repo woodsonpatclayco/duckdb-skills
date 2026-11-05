@@ -47,7 +47,13 @@ value is still an error):
                                          as an ERROR, before the fingerprint is ever
                                          evaluated -- and must never be auto-derived: a
                                          self-derived fingerprint always matches, which
-                                         destroys the one thing it catches.)
+                                         destroys the one thing it catches.
+                                         A column name holding a line break (an Excel
+                                         header typed with Alt+Enter) is written with the
+                                         two characters \n where the break is -- CR, LF
+                                         and CRLF alike -- e.g. `Job\nNumber|Amount`.
+                                         FINGERPRINT_OBSERVED prints it the same way. A
+                                         name without a line break is written as-is.)
     -- @anchor: <bare column name>      (OPTIONAL -- "this column is always populated"
                                          is an opinion Phil has to have. When absent, no
                                          ANCHOR line is emitted -- not a placeholder.
@@ -93,6 +99,13 @@ be generated as literal SQL text naming every column (never the "COLUMNS(*) IS N
 shorthand -- see the predicate-generation block below, which is intentionally isolated
 so each TASK.md mutation is a single-line edit).
 
+Reading DuckDB's answers (0.6.2): the column probe and the phase-2 values come back as
+JSON, one value per line (to_json in .mode list), and the formula checks as .mode json --
+never as .mode csv split line by line, which cut a header holding a line break in two (a
+Binder Error that skipped every check after it) and cut any value holding one. Every line
+this script prints is still one line: a line break in an observed column name or @snapshot
+value prints as \n, and check-contract.ps1 joins a multi-line @assert detail with " | ".
+
 Output contract (TASK.md deliverable 2, pinned so a caller can grep a line by its
 label rather than parse prose): one CONTRACT,<name> per contract; one
 ASSERT,<name>,<status>[,<detail>] per `-- @assert` (status is PASS/FAIL/ERROR, inherited
@@ -131,7 +144,8 @@ gated -- the same value, a genuinely different wiring. `-- @snapshot <name>: <ex
 supplies a self-contained scalar subquery (identical shape to an @assert expression,
 e.g. `(SELECT count(JOB_COSTS) FROM contract_view)`) evaluated once per contract in the
 same phase-2 DuckDB batch as ANCHOR/FINGERPRINT (no extra 68 MB read);
-`-- @snapshot_committed <name>: <literal>` supplies the value it was pinned at. Every
+`-- @snapshot_committed <name>: <literal>` supplies the value it was pinned at (a line break
+in the value is written \n, as in @fingerprint). Every
 run prints `SNAPSHOT,<name>,<observed>` unconditionally, and prints
 `SNAPSHOT_DRIFT,<name>,committed=<c>,observed=<o>` ONLY when the two differ -- but
 never, under any circumstance, increments $totalFailures. AC18 exists specifically to
@@ -277,6 +291,13 @@ function Get-UnknownDirectiveErrors {
         }
     }
     $errors
+}
+
+# A line break inside an observed column name or @snapshot value is written as the two
+# characters \n (CR, LF and CRLF alike): every output line stays one line, and a one-line
+# directive (@fingerprint, @snapshot_committed) can state it. Text without one is unchanged.
+function ConvertTo-OneLineText([string]$Text) {
+    return ($Text -replace "\r\n|\r|\n", '\n')
 }
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -542,9 +563,12 @@ foreach ($cf in $contractFiles) {
             Write-Output "SOURCE,$sourceKind,$sourceValue,$sheetName!$resolvedRange"
         }
 
-        $describeSql = ".mode csv`r`n.headers off`r`n" +
+        # The names come back as ONE JSON array on one line (to_json in .mode list), so a name
+        # holding a line break (an Alt+Enter header), quote, comma or apostrophe arrives whole.
+        # The .mode csv form this replaced split a line-break name into two bogus columns.
+        $describeSql = ".mode list`r`n.headers off`r`n" +
             "CREATE OR REPLACE VIEW _raw_probe AS SELECT * FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true, stop_at_empty = false);`r`n" +
-            "SELECT column_name FROM duckdb_columns() WHERE table_name = '_raw_probe' ORDER BY column_index;`r`n"
+            "SELECT to_json(list(column_name ORDER BY column_index)) FROM duckdb_columns() WHERE table_name = '_raw_probe';`r`n"
         $describeFile = Join-Path $scratchDir 'describe.sql'
         [System.IO.File]::WriteAllText($describeFile, $describeSql, $utf8NoBom)
 
@@ -560,10 +584,17 @@ foreach ($cf in $contractFiles) {
             continue
         }
 
-        # .mode csv wraps a name holding a quote, comma or apostrophe in "...", doubling any
-        # inner ". Undo exactly that (found by PLAN-6 item 4: "SDI On This Month's Costs").
-        $rawColumns = @($describeOutput | ForEach-Object { [string]$_ } | Where-Object { $_.Trim() -ne '' } |
-            ForEach-Object { if ($_.Length -ge 2 -and $_.StartsWith('"') -and $_.EndsWith('"')) { $_.Substring(1, $_.Length - 2).Replace('""', '"') } else { $_ } })
+        # No columns at all prints an empty line (to_json of NULL), never a '[' line.
+        $namesJson = @($describeOutput | ForEach-Object { [string]$_ } | Where-Object { $_.StartsWith('[') }) | Select-Object -Last 1
+        $namesParsed = @()
+        if ($namesJson) {
+            try { $namesParsed = ConvertFrom-Json -InputObject $namesJson } catch {
+                Write-Output "ERROR,$baseName,could not read the raw column list: $namesJson"
+                $totalFailures++
+                continue
+            }
+        }
+        $rawColumns = @($namesParsed | ForEach-Object { [string]$_ })
         # ---- MUTATION POINT ends here: $rawColumns is "every column read_xlsx
         # returns", discovered independently of the contract's own projection. ----
 
@@ -580,7 +611,12 @@ foreach ($cf in $contractFiles) {
         # that shorthand means "no column is null" (keep only fully-populated rows),
         # not "at least one column is non-null", and is banned by the spec for exactly
         # that reason. ---------------------------------------------------------------
-        $quotedCols = $rawColumns | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }
+        # A name holding a CR is named by position (#n: the same read, the same column order)
+        # instead: duckdb's script reader drops a CR that ends a line, so "a<CR><LF>b" cannot
+        # be written as an identifier in a -f file. A plain LF in a quoted identifier is fine.
+        $quotedCols = for ($ci = 0; $ci -lt $rawColumns.Count; $ci++) {
+            if ($rawColumns[$ci].Contains("`r")) { "#$($ci + 1)" } else { '"' + ($rawColumns[$ci] -replace '"', '""') + '"' }
+        }
         $allNullPredicate = ($quotedCols | ForEach-Object { "$_ IS NULL" }) -join ' AND '
         $withDataWhere = "NOT ($allNullPredicate)"
         # ---- MUTATION POINT ends here. ----
@@ -603,8 +639,11 @@ foreach ($cf in $contractFiles) {
         # `stop_at_empty = true` (or drop the option) on the _raw_withdata line below.
         # MUTATION POINT (TASK.md: "remove the all-null filter"): drop the
         # "WHERE $withDataWhere" clause from the same line. ----------------------------
+        # Each labelled value prints as one JSON pair, to_json(['<label>', <value>::VARCHAR]),
+        # on one line (.mode list): a value holding a line break, quote, comma or apostrophe
+        # arrives whole. ::VARCHAR is the same text .mode csv printed (NULL -> '', as before).
         $body = New-Object System.Text.StringBuilder
-        [void]$body.Append(".mode csv`r`n.headers off`r`n")
+        [void]$body.Append(".mode list`r`n.headers off`r`n")
         [void]$body.Append(".read '$compatFwd'`r`n")
         [void]$body.Append($xlsxRead)
         [void]$body.Append(".read '$cfFwd'`r`n")
@@ -612,19 +651,19 @@ foreach ($cf in $contractFiles) {
         [void]$body.Append("CREATE OR REPLACE VIEW contract_view AS SELECT * FROM _contract_data;`r`n")
         [void]$body.Append("CREATE OR REPLACE TEMP TABLE _raw_withdata AS SELECT * FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true, stop_at_empty = false) WHERE $withDataWhere;`r`n")
         # ---- MUTATION POINT ends here (the _raw_withdata line above). ----
-        [void]$body.Append("SELECT 'DEFAULT_ROWS', count(*) FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true$defaultExtra);`r`n")
-        [void]$body.Append("SELECT 'WITHDATA_ROWS', count(*) FROM _raw_withdata;`r`n")
-        [void]$body.Append("SELECT 'VIEW_ROWS', count(*) FROM contract_view;`r`n")
+        [void]$body.Append("SELECT to_json(['DEFAULT_ROWS', count(*)::VARCHAR]) FROM read_xlsx('$workbookPathFwd', $srcArgs, all_varchar = true$defaultExtra);`r`n")
+        [void]$body.Append("SELECT to_json(['WITHDATA_ROWS', count(*)::VARCHAR]) FROM _raw_withdata;`r`n")
+        [void]$body.Append("SELECT to_json(['VIEW_ROWS', count(*)::VARCHAR]) FROM contract_view;`r`n")
         if ($anchorPresent) {
-            [void]$body.Append("SELECT 'ANCHOR_TOTAL', count(*) FROM contract_view;`r`n")
-            [void]$body.Append("SELECT 'ANCHOR_NONNULL', $anchorSql FROM contract_view;`r`n")
+            [void]$body.Append("SELECT to_json(['ANCHOR_TOTAL', count(*)::VARCHAR]) FROM contract_view;`r`n")
+            [void]$body.Append("SELECT to_json(['ANCHOR_NONNULL', ($anchorSql)::VARCHAR]) FROM contract_view;`r`n")
         }
-        [void]$body.Append("SELECT 'FINGERPRINT_OBSERVED', string_agg(column_name, '|' ORDER BY column_index) FROM duckdb_columns() WHERE table_name = 'contract_view';`r`n")
+        [void]$body.Append("SELECT to_json(['FINGERPRINT_OBSERVED', string_agg(column_name, '|' ORDER BY column_index)]) FROM duckdb_columns() WHERE table_name = 'contract_view';`r`n")
         # Round 2 C1/C2: one SELECT per @snapshot, same self-contained-scalar-subquery
         # shape as an @assert expression -- evaluated in this same batch so a snapshot
         # never costs an extra 68 MB read.
         foreach ($sn in $snapshotRes.ByName.Keys) {
-            [void]$body.Append("SELECT '${sn}_SNAPSHOT', $($snapshotRes.ByName[$sn]);`r`n")
+            [void]$body.Append("SELECT to_json(['${sn}_SNAPSHOT', ($($snapshotRes.ByName[$sn]))::VARCHAR]);`r`n")
         }
 
         $bodyFile = Join-Path $scratchDir 'phase2.sql'
@@ -642,16 +681,15 @@ foreach ($cf in $contractFiles) {
             continue
         }
 
+        # Only a ["<label>", <value>] line is a value; anything else (output from the contract
+        # file itself) is ignored.
         $values = @{}
         foreach ($line in ($phase2Output | ForEach-Object { [string]$_ })) {
-            $m2 = [regex]::Match($line, '^([^,]+),(.*)$')
-            if ($m2.Success) {
-                $v2 = $m2.Groups[2].Value
-                # Same CSV quoting as the column probe above: a value holding a comma, quote or
-                # apostrophe comes back as "..." -- unwrap it (PLAN-6 item 4).
-                if ($v2.Length -ge 2 -and $v2.StartsWith('"') -and $v2.EndsWith('"')) { $v2 = $v2.Substring(1, $v2.Length - 2).Replace('""', '"') }
-                $values[$m2.Groups[1].Value] = $v2
-            }
+            if (-not $line.StartsWith('["')) { continue }
+            try { $pair = ConvertFrom-Json -InputObject $line } catch { continue }
+            $pair = @($pair)
+            if ($pair.Count -ne 2 -or $pair[0] -isnot [string]) { continue }
+            $values[$pair[0]] = if ($null -eq $pair[1]) { '' } else { [string]$pair[1] }
         }
 
         # Required-key set depends on whether @anchor was declared -- this list must
@@ -681,7 +719,7 @@ foreach ($cf in $contractFiles) {
             $anchorTotal = [int64]$values['ANCHOR_TOTAL']
             $anchorNonNull = [int64]$values['ANCHOR_NONNULL']
         }
-        $observedFingerprint = $values['FINGERPRINT_OBSERVED']
+        $observedFingerprint = ConvertTo-OneLineText $values['FINGERPRINT_OBSERVED']
 
         $rowsLost = $withDataRows - $defaultRows
         Write-Output "TRUNCATION_DEFAULT_ROWS,$defaultRows"
@@ -732,7 +770,7 @@ foreach ($cf in $contractFiles) {
                 $totalFailures++
                 continue
             }
-            $observedSnap = $values[$snapKey]
+            $observedSnap = ConvertTo-OneLineText $values[$snapKey]
             $committedSnap = $snapshotCommittedRes.ByName[$sn]
             Write-Output "SNAPSHOT,$sn,$observedSnap"
 
@@ -755,14 +793,18 @@ foreach ($cf in $contractFiles) {
         foreach ($fc in ($formulaChecks | Sort-Object Name)) {
             $q = Get-FormulaCheckSql -Keyword $fc.Keyword -Value $fc.Value -WorkbookPath $workbookPathFwd
             $fcFile = Join-Path $scratchDir "formula-$($fc.Name).sql"
-            [System.IO.File]::WriteAllText($fcFile, ".mode csv`r`n.headers on`r`n$xlsxRead$($q.Sql)`r`n", $utf8NoBom)
+            # .mode json, parsed whole: a detail holding a line break (a formula written over two
+            # lines) arrives whole. ConvertFrom-Csv over the output's separate lines cut it there.
+            [System.IO.File]::WriteAllText($fcFile, ".mode json`r`n$xlsxRead$($q.Sql)`r`n", $utf8NoBom)
             $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
             $fcOut = @(& duckdb @XlsxDuckdbArgs -f $fcFile 2>&1 | ForEach-Object { [string]$_ })
             $fcExit = $LASTEXITCODE
             $ErrorActionPreference = $prevEap
             $totalAssertions++
             $row = $null
-            if ($fcExit -eq 0) { $row = @($fcOut | ConvertFrom-Csv) | Select-Object -First 1 }
+            if ($fcExit -eq 0) {
+                try { $fcRows = ConvertFrom-Json -InputObject ($fcOut -join "`n"); $row = @($fcRows) | Select-Object -First 1 } catch { $row = $null }
+            }
             if ($fcExit -ne 0 -or -not $row) {
                 Write-Output "ASSERT,$($fc.Name),ERROR,@$($fc.Keyword): $((($fcOut -join ' ') -replace '\s+', ' ').Trim())"
                 $totalFailures++
