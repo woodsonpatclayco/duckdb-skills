@@ -278,9 +278,12 @@ try {
 # non-boolean value with a line break in it) prints its lines joined by " | ", blank lines
 # dropped. run-assertions.ps1 reads this output line by line, and cut such a detail at its
 # first line break. A detail without a line break prints exactly as it always did.
+# A blank stderr line from duckdb arrives as the text System.Management.Automation.RemoteException
+# (PowerShell 5.1's rendering of an empty error record); it carries nothing, so it is dropped too.
 function ConvertTo-OneLineDetail([string]$Text) {
     if ($Text -notmatch '[\r\n]') { return $Text }
-    return ((($Text -split '\r\n|\r|\n') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) -join ' | ')
+    return ((($Text -split '\r\n|\r|\n') | ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -ne '' -and $_ -ne 'System.Management.Automation.RemoteException' }) -join ' | ')
 }
 
 $anyFailure = $false

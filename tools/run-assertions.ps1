@@ -58,7 +58,9 @@ value is still an error):
                                          is an opinion Phil has to have. When absent, no
                                          ANCHOR line is emitted -- not a placeholder.
                                          Double-quoted by this script when building SQL,
-                                         so a hostile name like `Job #` is written plain)
+                                         so a hostile name like `Job #` is written plain.
+                                         A line break in the name is written \n, as in
+                                         @fingerprint: `-- @anchor: Job\nNumber`)
     -- @rows_floor: <integer>           (OPTIONAL -- a threshold is an opinion Phil has
                                          to choose. When absent, no ROWS_FLOOR line is
                                          emitted, and the count never falls through to
@@ -629,6 +631,12 @@ foreach ($cf in $contractFiles) {
         # this contract, including TRUNCATION_*/CONSISTENCY_*/FINGERPRINT.
         if ($anchorPresent) {
             $anchorSql = 'count("' + ($anchorExpr -replace '"', '""') + '")'
+            # An anchor written with \n (a line-break header, as in @fingerprint) is found by
+            # name with every CR, LF and CRLF read as \n -- a quoted identifier cannot hold a
+            # CRLF in a -f file. An anchor without \n builds the same SQL as before.
+            if ($anchorExpr.Contains('\n')) {
+                $anchorSql = "count(COLUMNS(lambda c: replace(replace(replace(c, chr(13) || chr(10), '\n'), chr(13), '\n'), chr(10), '\n') = '" + ($anchorExpr -replace "'", "''") + "'))"
+            }
         }
 
         # --- Phase 2: one heavy invocation per contract. Materializes contract_view
@@ -641,7 +649,9 @@ foreach ($cf in $contractFiles) {
         # "WHERE $withDataWhere" clause from the same line. ----------------------------
         # Each labelled value prints as one JSON pair, to_json(['<label>', <value>::VARCHAR]),
         # on one line (.mode list): a value holding a line break, quote, comma or apostrophe
-        # arrives whole. ::VARCHAR is the same text .mode csv printed (NULL -> '', as before).
+        # arrives whole. ::VARCHAR is the same text .mode csv printed, and a NULL (JSON null) is
+        # turned back into the text NULL below, as .mode csv printed it -- a contract that
+        # committed `@snapshot_committed x: NULL` keeps matching.
         $body = New-Object System.Text.StringBuilder
         [void]$body.Append(".mode list`r`n.headers off`r`n")
         [void]$body.Append(".read '$compatFwd'`r`n")
@@ -689,7 +699,7 @@ foreach ($cf in $contractFiles) {
             try { $pair = ConvertFrom-Json -InputObject $line } catch { continue }
             $pair = @($pair)
             if ($pair.Count -ne 2 -or $pair[0] -isnot [string]) { continue }
-            $values[$pair[0]] = if ($null -eq $pair[1]) { '' } else { [string]$pair[1] }
+            $values[$pair[0]] = if ($null -eq $pair[1]) { 'NULL' } else { [string]$pair[1] }
         }
 
         # Required-key set depends on whether @anchor was declared -- this list must

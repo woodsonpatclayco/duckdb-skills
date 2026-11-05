@@ -11,6 +11,11 @@ Project Profit's Risk_Reserve_Summary table.
                                a line break.
   Plain  (sheet Plain, A1:B3)  Code | Qty -- no line breaks anywhere
   Accents (sheet Accents, A1:B3)  Café | Plain -- non-ASCII header and values
+  Sparse (sheet Sparse, A1:C5) Job<LF>Number | Amount | Note<CR><LF>Text, one row per pattern:
+                               row 2 only Job<LF>Number filled, row 3 fully blank, row 4 only
+                               Note<CR><LF>Text filled, row 5 Amount and Note<CR><LF>Text.
+                               Leaving any column out of the all-null predicate, or dropping
+                               the predicate, changes the with-data count from 3.
 
 Written straight as XML (standard library only), like tests/make-formula-fixture.py, with
 cached values in every cell so read_xlsx returns data.
@@ -26,6 +31,7 @@ REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 # Header text as Excel holds it in the cell, and the name Excel writes into the table's column list.
 BREAKS_HEADERS = ["Job\nNumber", 'Cost "Code",\nType', "Amount", "Note\r\nText", "Calc"]
+SPARSE_HEADERS = ["Job\nNumber", "Amount", "Note\r\nText"]
 CALC = "IF(Breaks[[#This Row],[Amount]]>0,\nBreaks[[#This Row],[Amount]]*2,0)"
 
 
@@ -86,11 +92,19 @@ def main(out):
                2: [inline("A2", "crème"), num("B2", 1)],
                3: [inline("A3", "naïve"), num("B3", 2)]}
 
-    sheets = [("Data", data, "table1.xml"), ("Plain", plain, "table2.xml"), ("Accents", accents, "table3.xml")]
+    # Row 3 is left out of the sheet XML entirely: a fully blank row inside the table.
+    sparse = {1: [inline(f"{c}1", h) for c, h in zip("ABC", SPARSE_HEADERS)],
+              2: [inline("A2", "20001")],
+              4: [inline("C4", "note only")],
+              5: [num("B5", 500), inline("C5", "with amount")]}
+
+    sheets = [("Data", data, "table1.xml"), ("Plain", plain, "table2.xml"), ("Accents", accents, "table3.xml"),
+              ("Sparse", sparse, "table4.xml")]
     tables = {
         "table1.xml": table_xml(1, "Breaks", "A1:E5", BREAKS_HEADERS, {"Calc": CALC}),
         "table2.xml": table_xml(2, "Plain", "A1:B3", ["Code", "Qty"]),
         "table3.xml": table_xml(3, "Accents", "A1:B3", ["Café", "Plain"]),
+        "table4.xml": table_xml(4, "Sparse", "A1:C5", SPARSE_HEADERS),
     }
 
     parts = {
@@ -142,7 +156,8 @@ def main(out):
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for name, text in parts.items():
             z.writestr(name, text.encode("utf-8"))
-    print(f"wrote {out}: tables Breaks (Data!A1:E5), Plain (Plain!A1:B3), Accents (Accents!A1:B3)")
+    print(f"wrote {out}: tables Breaks (Data!A1:E5), Plain (Plain!A1:B3), Accents (Accents!A1:B3), "
+          "Sparse (Sparse!A1:C5)")
 
 
 if __name__ == "__main__":

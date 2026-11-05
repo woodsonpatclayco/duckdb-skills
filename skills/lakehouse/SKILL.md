@@ -161,7 +161,8 @@ line break as the two characters `\n` (CR, LF and CRLF alike):
 ```
 
 `FINGERPRINT_OBSERVED` and `SNAPSHOT,<name>,<value>` print a line break the same way, and a
-`@snapshot_committed` value is written the same way. A name without a line break is written
+`@snapshot_committed` value and an `@anchor` name (`-- @anchor: Job\nNumber`) are written the
+same way. A NULL `@snapshot` prints as `NULL`, as it always has. A name without a line break is written
 as-is, so existing fingerprints are unchanged. The checks themselves read such headers whole
 (the raw-column completeness check names every column, line breaks included), and the lake
 table keeps the real names. In an `@assert`/`@snapshot` expression, which is one line too,

@@ -12,16 +12,22 @@ this folder) and the code now:
   1. The line-break table: the old code shows the Binder Error; the new code has no ERROR line,
      FINGERPRINT,MATCH against a fingerprint written with \n, the formula check FAILs naming
      exactly the one typed cell, the @assert PASSes, the completeness check sees every row.
-  2. A drifted fingerprint prints the observed names on one line, line breaks as \n.
-  3. Multi-line details arrive whole on one line: an @assert's non-boolean value, an @assert's
+  2. The Sparse table: rows whose only value sits under Job<LF>Number or Note<CR><LF>Text, and a
+     blank row. The with-data count is exactly 3, so leaving any column out of the all-null
+     predicate (or dropping it) fails this check. An @anchor written Note\nText counts that column.
+  3. A drifted fingerprint prints the observed names on one line, line breaks as \n.
+  4. Multi-line details arrive whole on one line: an @assert's non-boolean value, an @assert's
      DuckDB error, and a formula check whose formula is written over two lines. The old code cut
-     each at its first line break.
-  4. A non-ASCII header (Cafe with an acute e): old and new print the same lines, in this console and under
+     each at its first line break. No detail carries PowerShell's RemoteException filler.
+  5. A non-ASCII header (Cafe with an acute e): old and new print the same lines, in this console and under
      code page 437 (a Windows PowerShell console's default).
-  5. materialize.ps1 writes the line-break table into a scratch lake with its real column
+  6. @snapshot values that are NULL or empty: old and new print the same lines (NULL as NULL),
+     and a committed NULL still matches.
+  7. materialize.ps1 writes the line-break table into a scratch lake with its real column
      names, and check history records the \n fingerprint. The real lake is never touched.
-  6. Regression: every contract in contracts\ and tests\contracts\ whose workbook is on this
-     machine prints the same lines, old and new. The workbooks are only read.
+  8. Regression: every contract in contracts\ and tests\contracts\ whose workbook is on this
+     machine prints the same lines, old and new, compared case-sensitively. The workbooks are
+     only read. Comparing no contract at all is a FAIL, not a pass.
 #>
 param(
     # The last commit before the fix (0.6.1).
@@ -37,7 +43,8 @@ $fail = 0
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 
 & git archive --format=tar -o "$work\old.tar" $Baseline tools skills extension/bin
-& tar -xf "$work\old.tar" -C $old
+# Windows' own tar: a GNU tar first on PATH (Git Bash) reads C: as a remote host.
+& "$env:SystemRoot\System32\tar.exe" -xf "$work\old.tar" -C $old
 if (-not (Test-Path "$old\tools\run-assertions.ps1")) { Write-Output "ERROR: could not extract $Baseline"; exit 1 }
 
 function Run($script, [string[]]$argList) {
@@ -95,6 +102,27 @@ $ml = Contract 'Multiline_Details' @'
 CREATE OR REPLACE VIEW contract_view AS
 SELECT * FROM read_xlsx_table('<WB>', 'Plain');
 '@
+$sparse = Contract 'Sparse_Rows' @'
+-- Fixture: table Sparse, headers Job<LF>Number | Amount | Note<CR><LF>Text. Row 2 has only
+-- Job<LF>Number, row 3 is blank, row 4 has only Note<CR><LF>Text, row 5 Amount and the note.
+-- @table: Sparse
+-- @fingerprint: Job\nNumber|Amount|Note\nText
+-- @anchor: Note\nText
+
+CREATE OR REPLACE VIEW contract_view AS
+SELECT * FROM read_xlsx_table('<WB>', 'Sparse');
+'@
+$nulls = Contract 'Null_Snapshots' @'
+-- @table: Plain
+-- @fingerprint: Code|Qty
+-- @snapshot none_max: (SELECT max(Code) FROM contract_view WHERE Code = 'zzz')
+-- @snapshot_committed none_max: NULL
+-- @snapshot empty_text: (SELECT '')
+-- @snapshot_committed empty_text:
+
+CREATE OR REPLACE VIEW contract_view AS
+SELECT * FROM read_xlsx_table('<WB>', 'Plain');
+'@
 $acc = Contract 'Accents' @'
 -- The Accents table's first header is Caf<e-acute>; this file itself is plain ASCII.
 -- @table: Accents
@@ -124,19 +152,31 @@ Check ($b -contains 'FINGERPRINT,MATCH') 'new code: FINGERPRINT,MATCH'
 $d = Detail $b 'calc_consistent'
 Check (($b | Where-Object { $_ -like 'ASSERT,calc_consistent,FAIL,*' }) -and $d -match 'typed values 1, blanks 0' -and $d -match '-- not a formula: E4 \(99\)$') 'new code: calc_consistent FAILs, naming exactly E4 (the one typed cell)'
 Check ($b -contains 'ASSERT,four_jobs,PASS') 'new code: @assert four_jobs PASSes'
-Check (($b -contains 'TRUNCATION_ROWS_LOST,0') -and ($b -contains 'TRUNCATION_WITHDATA_ROWS,4') -and ($b -contains 'CONSISTENCY_VIEW_ROWS,4')) 'new code: the completeness check names every raw column and counts 4 rows, 0 lost'
+Check (($b -contains 'TRUNCATION_ROWS_LOST,0') -and ($b -contains 'TRUNCATION_WITHDATA_ROWS,4') -and ($b -contains 'CONSISTENCY_VIEW_ROWS,4')) 'new code: the completeness check counts 4 rows, 0 lost'
 Check (($b -contains 'SNAPSHOT,note_min,line one\nline two') -and -not ($b | Where-Object { $_ -like 'SNAPSHOT_DRIFT,*' })) 'new code: a value with a line break prints as \n and matches its committed value'
 
-# --- 2. fingerprint drift prints one line ------------------------------------------------------
+# --- 2. sparse rows: every column reaches the all-null predicate --------------------------------
 Write-Output ''
-Write-Output '2. A fingerprint that left out Calc: the drift report, one line per item'
+Write-Output '2. Table Sparse: row 2 only Job<LF>Number, row 3 blank, row 4 only Note<CR><LF>Text, row 5 Amount + Note'
+$a = Run "$old\tools\run-assertions.ps1" @('-Contract', $sparse)
+$b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $sparse)
+Show "old code ($Baseline):" $a
+Check ([bool]($a | Where-Object { $_ -like 'ERROR,*' -and $_ -like '*Binder Error*' })) 'old code: ERROR with a Binder Error (the bug)'
+Show 'new code:' $b
+Check (-not ($b | Where-Object { $_ -like 'ERROR,*' })) 'new code: no ERROR line'
+Check (($b -contains 'TRUNCATION_WITHDATA_ROWS,3') -and ($b -contains 'TRUNCATION_DEFAULT_ROWS,1') -and ($b -contains 'TRUNCATION_ROWS_LOST,2')) 'new code: with-data rows exactly 3 (rows 2, 4, 5; not the blank row 3), so both line-break columns are in the all-null predicate; the default read stops at the blank row, 2 lost'
+Check ($b -contains 'ANCHOR,Note\nText,2,FAIL') 'new code: @anchor Note\nText finds the CR<LF> column and counts its 2 values (Job and Amount have 1 each)'
+
+# --- 3. fingerprint drift prints one line ------------------------------------------------------
+Write-Output ''
+Write-Output '3. A fingerprint that left out Calc: the drift report, one line per item'
 $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $drift)
 $b | Where-Object { $_ -like 'FINGERPRINT*' } | ForEach-Object { Write-Output "      $_" }
 Check (($b -contains 'FINGERPRINT,DRIFT') -and ($b -contains "FINGERPRINT_OBSERVED,$fp")) "FINGERPRINT_OBSERVED,$fp"
 
-# --- 3. multi-line details ---------------------------------------------------------------------
+# --- 4. multi-line details ---------------------------------------------------------------------
 Write-Output ''
-Write-Output '3. Multi-line details (contract over table Plain; its formula check names Breaks[Calc], whose formula spans two lines)'
+Write-Output '4. Multi-line details (contract over table Plain; its formula check names Breaks[Calc], whose formula spans two lines)'
 $a = Run "$old\tools\run-assertions.ps1" @('-Contract', $ml)
 $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $ml)
 Show "old code ($Baseline):" @($a | Where-Object { $_ -like 'ASSERT,*' })
@@ -150,14 +190,15 @@ foreach ($c in $cases) {
     $da = Detail $a $c.name; $db = Detail $b $c.name
     Check (($da -notmatch $c.whole) -and ($db -match $c.whole)) "$($c.what): old cut at the line break, new whole ($($da.Length) -> $($db.Length) chars)"
 }
+Check (-not ($b | Where-Object { $_ -like 'ASSERT,*' -and $_ -like '*RemoteException*' })) 'new code: no detail carries System.Management.Automation.RemoteException (a blank stderr line)'
 
-# --- 4. non-ASCII header -----------------------------------------------------------------------
+# --- 5. non-ASCII header -----------------------------------------------------------------------
 Write-Output ''
-Write-Output "4. Non-ASCII header Caf$([char]0xE9) (table Accents): old and new print the same lines"
+Write-Output "5. Non-ASCII header Caf$([char]0xE9) (table Accents): old and new print the same lines"
 $a = Run "$old\tools\run-assertions.ps1" @('-Contract', $acc)
 $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $acc)
 $b | Where-Object { $_ -like 'FINGERPRINT_OBSERVED,*' -or $_ -like 'SNAPSHOT*' } | ForEach-Object { Write-Output "      $_" }
-$diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0) } else { @('empty') }
+$diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
 Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("this console (code page {0}): {1} lines old, {2} new, identical" -f [Console]::OutputEncoding.CodePage, $a.Count, $b.Count)
 $orig = $null
 try { $orig = [Console]::OutputEncoding.CodePage } catch { }
@@ -166,7 +207,7 @@ if ($orig) {
         $a = @(cmd /c "chcp 437 >nul & powershell -NoProfile -ExecutionPolicy Bypass -File `"$old\tools\run-assertions.ps1`" -Contract `"$acc`" 2>nul" | ForEach-Object { [string]$_ })
         $b = @(cmd /c "chcp 437 >nul & powershell -NoProfile -ExecutionPolicy Bypass -File `"$repo\tools\run-assertions.ps1`" -Contract `"$acc`" 2>nul" | ForEach-Object { [string]$_ })
     } finally { cmd /c "chcp $orig >nul" }
-    $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0) } else { @('empty') }
+    $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
     $verdict = ($b | Where-Object { $_ -like 'ERROR,*' -or $_ -like 'FINGERPRINT,*' } | Select-Object -First 1)
     if ($verdict.Length -gt 90) { $verdict = $verdict.Substring(0, 90) + '...' }
     Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("code page 437: {0} lines old, {1} new, identical (both: {2})" -f $a.Count, $b.Count, $verdict)
@@ -174,9 +215,20 @@ if ($orig) {
     Write-Output '   SKIP  code page 437: this process has no console to switch'
 }
 
-# --- 5. materialize ----------------------------------------------------------------------------
+# --- 6. NULL and empty @snapshot values --------------------------------------------------------
 Write-Output ''
-Write-Output '5. materialize.ps1: the line-break table into a scratch lake (Linebreak_Drift, so the checks pass)'
+Write-Output '6. @snapshot values that are NULL (max over no rows) and empty (''''): old and new print the same lines'
+$a = Run "$old\tools\run-assertions.ps1" @('-Contract', $nulls)
+$b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $nulls)
+Show "old code ($Baseline):" @($a | Where-Object { $_ -like 'SNAPSHOT*' })
+Show 'new code:' @($b | Where-Object { $_ -like 'SNAPSHOT*' })
+$diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
+Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("{0} lines old, {1} new, identical" -f $a.Count, $b.Count)
+Check (($b -ccontains 'SNAPSHOT,none_max,NULL') -and ($b -ccontains 'SNAPSHOT,empty_text,') -and -not ($b | Where-Object { $_ -like 'SNAPSHOT_DRIFT,*' })) 'new code: NULL prints as NULL, empty as empty, and neither drifts from its committed value'
+
+# --- 7. materialize ----------------------------------------------------------------------------
+Write-Output ''
+Write-Output '7. materialize.ps1: the line-break table into a scratch lake (Linebreak_Drift, so the checks pass)'
 $lake = Join-Path $work 'lake'
 $m = Run "$repo\tools\materialize.ps1" @('-Contract', $drift, '-LakeRoot', $lake) | Where-Object { $_ -like 'MATERIALIZE,*' }
 Write-Output "      $m"
@@ -193,10 +245,11 @@ Check ($m -like 'MATERIALIZE,Linebreak_Drift,REFRESHED,4*') 'materialized 4 rows
 Check ($r -contains '["Job\nNumber","Cost \"Code\",\nType","Amount","Note\r\nText","Calc"]') 'the lake table keeps the real names (JSON above: \n and \r\n are the real line breaks)'
 Check ($r -contains "Job\nNumber|Cost `"Code`",\nType|Amount|Note\nText|Calc") 'check_history.observed holds the fingerprint on one line, line breaks as \n'
 
-# --- 6. regression -----------------------------------------------------------------------------
+# --- 8. regression -----------------------------------------------------------------------------
 Write-Output ''
-Write-Output "6. Every contract whose workbook is on this machine: code at $Baseline vs code now"
+Write-Output "8. Every contract whose workbook is on this machine: code at $Baseline vs code now"
 $contracts = @(Get-ChildItem "$repo\contracts\*.sql", "$repo\tests\contracts\*.sql" | Sort-Object FullName)
+$compared = 0
 foreach ($cf in $contracts) {
     $rel = $cf.FullName.Substring($repo.Length + 1)
     $m1 = [regex]::Match([IO.File]::ReadAllText($cf.FullName), "read_xlsx(?:_table|_name)?\(\s*'([^']+)'", 'IgnoreCase')
@@ -206,10 +259,12 @@ foreach ($cf in $contracts) {
     }
     $a = Run "$old\tools\run-assertions.ps1" @('-Contract', $cf.FullName)
     $b = Run "$repo\tools\run-assertions.ps1" @('-Contract', $cf.FullName)
-    $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0) } else { @('empty') }
+    $compared++
+    $diff = if ($a.Count -and $b.Count) { @(Compare-Object $a $b -SyncWindow 0 -CaseSensitive) } else { @('empty') }
     Check ($a.Count -gt 0 -and $diff.Count -eq 0) ("{0}: {1} lines old, {2} new, {3}" -f $rel, $a.Count, $b.Count, $(if ($diff.Count) { "$($diff.Count) differ" } else { 'identical' }))
     if ($diff.Count) { $diff | ForEach-Object { Write-Output "         $($_.SideIndicator) $($_.InputObject)" } }
 }
+Check ($compared -gt 0) "compared $compared of $($contracts.Count) contracts (none compared would prove nothing)"
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Output ''
