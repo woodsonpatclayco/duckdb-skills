@@ -251,8 +251,21 @@ class Workbook:
 # ---------------------------------------------------------------- formulas (PLAN-6 item 3)
 
 FORMULA_COLS = ["workbook_key", "sheet", "cell", "row", "col", "table_name", "table_column",
-                "kind", "formula_a1", "formula_r1c1", "cached_value", "error"]
+                "kind", "formula_a1", "formula_r1c1", "cached_value", "error", "array_ref"]
 _REF = re.compile(r"([A-Z]+)(\d+)")
+
+
+def is_spill_placeholder(fml):
+    """True for the empty <f ca="1"/> Excel writes into each spilled child cell of a VOLATILE
+    dynamic array: a plain formula (no t, or t="normal") with no text. It has no formula of its
+    own -- the anchor's <f t="array" ref=...> holds it -- so it is read as a non-formula cell.
+    Every other empty <f> stays a formula: shared dependents (<f t="shared" si="3"/>, translated
+    from their master), data tables (their inputs are attributes), and array masters."""
+    return fml is not None and fml[0] == "normal" and not fml[3]
+
+
+def is_formula(fml):
+    return fml is not None and not is_spill_placeholder(fml)
 
 
 def shared_strings(z):
@@ -329,7 +342,10 @@ def extract_formulas(wb):
       - every cell showing an error (t="e"), formula or not -- query-written #N/A values too;
       - every non-formula cell (typed value or blank) in the data body of a table column that
         holds a formula in at least one of its cells. Decided from the cells, never from the
-        table's calculatedColumnFormula, which is often stale."""
+        table's calculatedColumnFormula, which is often stale.
+    A spill placeholder (is_spill_placeholder) is a non-formula cell here, wherever it sits.
+    array_ref is an array formula's ref rectangle exactly as stored (legacy CSE and dynamic
+    arrays alike, "A1" for a one-cell array), and empty on every other row."""
     from xlsx_r1c1 import tokenize, render_a1, render_r1c1
     key = norm_path(wb.path)
     sst = shared_strings(wb.z)
@@ -351,17 +367,19 @@ def extract_formulas(wb):
                     return t, (names[i] if i < len(names) else "")
             return None, ""
 
-        def row_of(r, c, tbl, tcol, kind, a1, r1c1, value, error):
+        def row_of(r, c, tbl, tcol, kind, a1, r1c1, value, error, array_ref=""):
             return {"workbook_key": key, "sheet": sheet, "cell": f"{num_to_col(c)}{r}", "row": r,
                     "col": c, "table_name": tbl["table"] if tbl else "", "table_column": tcol,
                     "kind": kind, "formula_a1": a1, "formula_r1c1": r1c1,
-                    "cached_value": value, "error": error}
+                    "cached_value": value, "error": error, "array_ref": array_ref}
 
         masters = {}            # si -> (tokens, row, col, r1c1)
         pending = []            # shared dependents seen before their master
         formula_cols = set()    # (table, column index) holding >= 1 formula cell
         emitted = set()         # (row, col) already written for a table body
         for r, c, ctype, fml, val in iter_cells(wb.z, part):
+            if not is_formula(fml):
+                fml = None                             # no formula, or a spill placeholder
             if fml is None and ctype != "e":
                 continue
             value = cell_value(ctype, val, sst)
@@ -372,7 +390,7 @@ def extract_formulas(wb):
                     emitted.add((r, c))
                 yield row_of(r, c, tbl, tcol, "none", "", "", value, error)
                 continue
-            fkind, _ref, si, text = fml
+            fkind, ref, si, text = fml
             if tbl:
                 formula_cols.add((tbl["table"], c))
                 emitted.add((r, c))
@@ -391,7 +409,7 @@ def extract_formulas(wb):
                 yield row_of(r, c, tbl, tcol, "data-table", text, text, value, error)
             else:
                 yield row_of(r, c, tbl, tcol, fkind, text, render_r1c1(tokenize(text), r, c),
-                             value, error)
+                             value, error, (ref or "") if fkind == "array" else "")
         for p in pending:                              # master came later in the file
             si = p["formula_a1"]
             if si in masters:
@@ -413,7 +431,7 @@ def extract_formulas(wb):
                     want[c] = t
         for r, c, ctype, fml, val in iter_cells(wb.z, part):
             t = want.get(c)
-            if not t or fml is not None:
+            if not t or is_formula(fml):
                 continue
             c1, r1, c2, r2 = t["body"]
             if not r1 <= r <= r2:

@@ -210,7 +210,11 @@ not — query-written `#N/A` values included), and per non-formula cell (typed v
 inside a table column that has formulas. Columns: `sheet, cell, row, col, table_name,
 table_column, kind` (normal / shared / array / data-table / none), `formula_a1` (as Excel
 stored it, no leading `=`), `formula_r1c1` (position-independent: one logical formula has one
-R1C1 form on every row), `cached_value, error`. It streams every sheet, so only add
+R1C1 form on every row), `cached_value, error, array_ref` (an array formula's range exactly
+as stored -- `I128:I146` for a legacy CSE array or a dynamic array's spill, `A1` for a one-cell
+array -- and empty on every other row). Only an array's anchor cell is a formula cell; the
+cells it spills into are not (Excel writes an empty `<f ca="1"/>` into each spilled cell of a
+volatile dynamic array, and those are read as plain values). It streams every sheet, so only add
 `--formulas` when the question is about formulas. Example — formula columns of a table that
 are not one consistent formula:
 
