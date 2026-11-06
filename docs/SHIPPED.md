@@ -2,6 +2,42 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-11-05 — Formula view: spill cells are values; array formulas keep their range (v0.6.3)
+
+**The feature:** `read_xlsx_formulas` / `xlsx_formulas` count only real formulas. The cells
+a dynamic array spills into (stored by Excel as an empty `<f ca="1"/>`) now read as plain
+values, as they do in Excel. Each array formula's stored range is a new last column,
+`array_ref` (e.g. `I128:I146`). Found by the Project Profit data quality checks
+(risk-reserve), whose own scanner had to work around both gaps.
+
+**Before / after:** on Project Profit 26-10 October, v0.6.2 listed 803,144 formula rows,
+667,308 of them empty spill placeholders of kind `normal`. v0.6.3 lists 135,836, matching an
+independent recount of the file kind by kind, with 0 empty `normal` rows. The 1,866
+placeholders that show an error are still reported, as kind `none` with the error. Every one
+of the 43,467 array rows carries its `array_ref`. With the I128 incident planted,
+`'10002556'!I128` reads `I128:I146`. Before the change it had no range at all.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\prove-xlsx-arrays.ps1
+
+Expect `RESULT: PASS`. The run shows the old code's 6 placeholder rows of kind `normal` with
+empty text, the new view's 17 fixture rows, the Project Profit counts above, and 5 of 5
+contracts identical old vs new.
+
+**What deliberately did not change:**
+- **Shared-formula dependents stay formulas.** `<f t="shared" si=".."/>` is empty too, but it
+  is a real formula. Empty array masters and data tables also stay as formula rows.
+- **`iter_cells` is unchanged.** risk-reserve's `scan_circular.py` imports it. The placeholder
+  rule lives in `extract_formulas`.
+- **Contract output is unchanged.** It is identical old vs new on this repo's 5 contracts and
+  on risk-reserve's Project Profit contract (133 checks, the same 18 failures). No formula
+  check reads `array_ref`.
+- **The C++ extension still has no formula view.** Formulas stay on Python.
+- **`prove-contract-tables.ps1` still calls plain `tar`,** as noted under v0.6.2.
+- **The proof's "risk-reserve git status unchanged" check fails falsely** if another session
+  edits that repo while it runs. The proof only reads from risk-reserve.
+
 ## 2026-11-05 — Contracts read Excel headers with line breaks (v0.6.2)
 
 **The feature:** a contract can use a table whose header cells hold a line break (Alt+Enter)
