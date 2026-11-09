@@ -61,6 +61,37 @@ a NULL text value arrives as an empty string, and `TIMESTAMP WITH TIME ZONE` is 
 the exporting machine's time zone. Types the M does not map (UUID, HUGEINT, INTERVAL, LIST, ...)
 load as text, and the tool's output names each one.
 
+### Snowflake-only lake tables: `<table>.snowflake.sql`
+
+A CSV lake table whose data comes only from Snowflake also gets `<table>.snowflake.sql` next
+to its CSV. It contains the query the lake pull runs, so a person with Snowflake access can
+pull the same table live, and optionally for only some projects, without the CSV. It is plain
+SQL with nothing else in it: a short how-to header, the query, and at the end a commented-out
+`/* WHERE lake_table.<column> IN ('<project>', '<project>') */` line. To switch the filter on,
+delete the `/*` and `*/` and list the projects. The file is separate from the table's DuckDB
+contract, which still gates the CSV.
+
+```bash
+py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/snowflake_pq_sql.py" write --query <the pull's .sql> \
+  --table <table> --dest <CSV lake folder> [--project-column PROJECT_NUMBER]
+py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/snowflake_pq_sql.py" check --file <dest>\<table>.snowflake.sql \
+  [--query <the pull's .sql>] [--projects 10002556,10005145]
+```
+
+`write` builds the file from the same query file the pull runs, so the two never drift apart.
+It rewrites the file only when its text changes. It refuses (exit 2) a query that Power Query
+could not run as one statement: a `SET` or `USE` first, two statements, or a `$variable`.
+`check` runs the file in Snowflake and prints its row count. With `--query`, it says whether
+the file returns exactly the source query's rows. With `--projects`, it switches the filter on
+the way the comment tells a person to, and says whether the result is exactly the full
+result's rows for those projects.
+
+Excel on Clayco laptops has **no built-in Snowflake connector**: `Snowflake.Databases` fails
+with "matches no exports". The file is pasted into Data > Get Data > From Other Sources >
+From ODBC > the `Snowflake` DSN > Advanced options > SQL statement. Power BI's Snowflake
+connector takes the same text. Column names come back upper case (the lake CSVs have them
+lower case), and these rows have not been through the contract's checks.
+
 ## Step 2 — Convert
 
 Run a single DuckDB command. Prepend extension loads as needed based on both the input and output formats.

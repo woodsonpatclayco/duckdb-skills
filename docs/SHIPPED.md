@@ -2,6 +2,49 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-11-09 — Snowflake-only lake tables get a paste-ready `.snowflake.sql` (v0.7.0)
+
+**The feature:** a CSV lake table whose data comes only from Snowflake can have
+`<table>.snowflake.sql` next to its CSV. The file holds the query the lake pull runs, ready
+to paste into Power Query, so someone with Snowflake access can pull the same table live.
+At the end is a commented-out `WHERE <project column> IN (...)` line for pulling only some
+projects. The file is plain SQL plus comments, and it is separate from the table's DuckDB
+contract. `tools\snowflake_pq_sql.py write` builds it from the pull's own query file.
+`check` runs it in Snowflake, both as written and with the filter switched on. The pattern
+is documented in the convert-file skill.
+
+**Before / after:** before, the only way to get `job_milestone` into Excel was the CSV, or
+copying Schedule-Data's 300-line query and editing it by hand. After, `write` produces a
+321-line file from that query. Run in Snowflake it returns 2,036 rows and 31 columns, the
+same rows as the query itself and the same count as the lake's `job_milestone.csv` today.
+Switching the filter on for 10002556 and 10005145 returns 8 rows, exactly those two jobs'
+rows. A hidden Excel running the file's text through `Odbc.Query("dsn=Snowflake")` gets the
+same 2,036 rows, and the same 8 with the filter on.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\prove-snowflake-pq-sql.ps1
+
+Expect `RESULT: PASS`. Before it you should see the file's header and end, a refused
+two-statement query (exit 2), `SAME rows and columns`, `SAME rows` for the filter, and Excel's
+`2036` and `8`. `-NoExcel` skips the Excel step.
+
+**What deliberately did not change:**
+- **No project's exporter writes the file yet.** Schedule-Data's `lake_publish.py`, the
+  over/under `sp_export.py` and risk-reserve's `publish_csv_lake.py` belong to those repos, and
+  nothing was written to the SharePoint lake. Wiring a project in takes one `write` call after
+  its CSV export.
+- **The CSV stays.** The `.snowflake.sql` sits alongside it and does not replace it. The CSV is
+  the copy the contract checked; rows from the SQL have not been checked.
+- **Column names are not aliased to match the CSV.** Snowflake returns them in upper case,
+  while the lake CSVs have them in lower case. A workbook moved from one source to the other
+  needs its column steps renamed.
+- **The filter is applied around the whole query,** not inside it, so it always returns the
+  full table's rows for those projects. It does not make the query itself run faster.
+- **`_manifest.csv` is unchanged.** It does not list the `.snowflake.sql`.
+- **No M code is generated for it.** Excel has no `Snowflake.Databases` (it fails with
+  "matches no exports"), so the header points to From ODBC > Snowflake DSN > SQL statement.
+
 ## 2026-11-05 — Formula view: spill cells are values; array formulas keep their range (v0.6.3)
 
 **The feature:** `read_xlsx_formulas` / `xlsx_formulas` count only real formulas. The cells
