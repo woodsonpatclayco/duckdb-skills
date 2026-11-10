@@ -1,14 +1,19 @@
-"""snowflake_pq_sql.py -- the <table>.snowflake.sql file for a Snowflake-only CSV lake table.
+"""snowflake_pq_sql.py -- <table>.snowflake.sql and its Power Query for a Snowflake-only CSV lake table.
 
-A lake table that comes only from Snowflake gets, next to <table>.csv, a file holding the query
-the lake pull runs, ready to paste into Power Query (Excel: From ODBC > Snowflake DSN > Advanced
-options > SQL statement). It is plain SQL: a short header, the query, and -- when the table has a
-project column -- a commented-out WHERE line at the end that a person switches on to pull only
-some projects.
+A lake table that comes only from Snowflake gets two files next to <table>.csv:
+  <table>.snowflake.sql   the query the lake pull runs, as plain SQL: a short header, the query,
+                          and -- when the table has a project column -- a commented-out WHERE
+                          line at the end that switches on a project filter.
+  <table>.snowflake.pq.m  the Power Query to paste into a Blank Query: it reads the .sql from
+                          the SharePoint folder and runs it with Odbc.Query("dsn=Snowflake", ...).
+                          Its Projects list ({} = every project) switches the filter line on.
 
-  write --query Q --table T --dest DIR [--project-column COL] [--source-label TEXT]
-        Writes DIR\\T.snowflake.sql from the query file Q. Rewrites it only when the text
-        changes, and prints "wrote" or "unchanged". Exit 2 when Q cannot run in Power Query
+  write --query Q --table T --dest DIR (--folder-url URL | --local) [--project-column COL]
+        [--source-label TEXT]
+        Writes both files into DIR from the query file Q and the template
+        skills\\convert-file\\snowflake-sql-sharepoint.m. URL is DIR's SharePoint folder URL;
+        --local makes the M read DIR with File.Contents instead (for tests). Each file is
+        rewritten only when its text changes ("wrote" or "unchanged"). Exit 2 when Q cannot run
         as one statement (SET/USE first, two statements, a $session variable).
   check --file F [--projects P1,P2] [--query Q] [--connection DATAHUB]
         Runs F in Snowflake as written and prints its row and column counts. --query also runs
@@ -25,7 +30,9 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE = os.path.join(os.path.dirname(HERE), "skills", "convert-file", "snowflake-sql-sharepoint.m")
 SUFFIX = ".snowflake.sql"
+M_SUFFIX = ".snowflake.pq.m"
 ALIAS = "lake_table"
 PLACEHOLDER = "'<project>', '<project>'"
 # The project filter line exactly as write() emits it.
@@ -139,19 +146,9 @@ def git_label(path):
 
 def render(body, table, source, project_column=None):
     lines = [
-        "-- %s: the Snowflake query behind %s.csv, ready to paste into Power Query." % (table, table),
-        "--",
-        "-- Excel: Data > Get Data > From Other Sources > From ODBC, choose the Snowflake DSN, open Advanced",
-        "--   options and paste this whole file into \"SQL statement\". (Excel has no built-in Snowflake",
-        "--   connector; Power BI's Snowflake connector takes the same text under Advanced options.)",
-        "-- It returns live data with your own Snowflake sign-in. %s.csv is the copy that passed the" % table,
-        "--   lake contract's checks when it was exported; rows from this query have not been checked.",
-        "-- Column names come back as Snowflake writes them, usually upper case.",
-    ]
-    if project_column:
-        lines.append("-- Project filter: see PROJECT FILTER at the end. As written, it returns every project.")
-    lines += [
-        "--",
+        "-- %s: the Snowflake query behind %s.csv. Power Query runs it with %s%s, next to it." % (
+            table, table, table, M_SUFFIX),
+        "-- The rows are live, not checked: %s.csv is the copy that passed the lake contract's checks." % table,
         "-- Written from %s by duckdb-skills tools\\snowflake_pq_sql.py." % source,
         "--   The next export overwrites this file; change the source query instead.",
     ]
@@ -160,8 +157,8 @@ def render(body, table, source, project_column=None):
         lines += body.split("\n")
         lines += [
             ") AS %s" % ALIAS,
-            "-- PROJECT FILTER (optional). To return only some projects, delete the /* and the */ on the",
-            "-- next line and put your project numbers in the list, each in single quotes, separated by commas.",
+            "-- PROJECT FILTER (optional). %s%s switches the next line on from its Projects list." % (table, M_SUFFIX),
+            "-- By hand: delete the /* and the */ and list your project numbers, each in single quotes.",
             "/* WHERE %s.%s IN (%s) */" % (ALIAS, project_column, PLACEHOLDER),
         ]
     else:
@@ -169,32 +166,70 @@ def render(body, table, source, project_column=None):
     return "\r\n".join(lines) + "\r\n"
 
 
-def do_write(a):
-    with open(a.query, encoding="utf-8-sig") as f:
-        text = f.read()
-    try:
-        body = query_body(text)
-    except Refused as e:
-        print("ERROR: %s: %s" % (a.query, e), file=sys.stderr)
-        return 2
-    if a.project_column and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", a.project_column):
-        print("ERROR: --project-column must be a plain column name, got %r" % a.project_column,
-              file=sys.stderr)
-        return 2
-    out = render(body, a.table, a.source_label or git_label(a.query), a.project_column)
-    data = out.encode("utf-8")
-    path = os.path.join(a.dest, a.table + SUFFIX)
+def mstr(s):
+    return s.replace('"', '""')
+
+
+def render_m(table, project_column, folder_url=None, local_dir=None):
+    with open(TEMPLATE, encoding="utf-8-sig") as f:
+        m = f.read().replace("\r\n", "\n")
+    m = m.replace("{{TABLE}}", mstr(table)).replace("{{PROJECT_COLUMN}}", mstr(project_column or ""))
+    if local_dir:
+        folder = os.path.abspath(local_dir).rstrip("\\/") + "\\"
+        m = m.replace("{{SITE_URL}}", "(not used: --local reads FolderPath with File.Contents)")
+        m = m.replace("{{FOLDER_PATH}}", mstr(folder))
+        m = re.sub(r"(?s)(// SOURCE\n).*?(\s*// END SOURCE)",
+                   lambda g: g.group(1) + "    ReadFile = (name as text) as binary => File.Contents(FolderPath & name),"
+                   + g.group(2), m)
+    else:
+        site = re.match(r"(https://[^/]+/(?:sites|teams|personal)/[^/]+)/", folder_url)
+        if not site:
+            raise Refused("--folder-url must be the folder's SharePoint URL, "
+                          "https://<tenant>.sharepoint.com/sites/<site>/...: %s" % folder_url)
+        folder = folder_url if folder_url.endswith("/") else folder_url + "/"
+        m = m.replace("{{SITE_URL}}", mstr(site.group(1))).replace("{{FOLDER_PATH}}", mstr(folder))
+    left = sorted(set(re.findall(r"\{\{[A-Z_]+\}\}", m)))
+    if left:
+        raise Refused("the M template has placeholders this tool does not fill: %s" % ", ".join(left))
+    return m.replace("\n", "\r\n")
+
+
+def put(path, text):
+    """Write text to path only when it differs; print what happened."""
+    data = text.encode("utf-8")
     if os.path.exists(path):
         with open(path, "rb") as f:
             if f.read() == data:
                 print("unchanged %s" % path)
-                return 0
-    os.makedirs(a.dest, exist_ok=True)
+                return
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(data)
     os.replace(tmp, path)
-    print("wrote %s (%d lines)" % (path, out.count("\r\n")))
+    print("wrote %s (%d lines)" % (path, text.count("\r\n")))
+
+
+def do_write(a):
+    with open(a.query, encoding="utf-8-sig") as f:
+        text = f.read()
+    if a.project_column and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", a.project_column):
+        print("ERROR: --project-column must be a plain column name, got %r" % a.project_column,
+              file=sys.stderr)
+        return 2
+    if bool(a.folder_url) == bool(a.local):
+        print("ERROR: pass --folder-url (the folder's SharePoint URL) or --local, not both or neither",
+              file=sys.stderr)
+        return 2
+    try:
+        body = query_body(text)
+        sql = render(body, a.table, a.source_label or git_label(a.query), a.project_column)
+        m = render_m(a.table, a.project_column, a.folder_url, a.dest if a.local else None)
+    except Refused as e:
+        print("ERROR: %s: %s" % (a.query, e), file=sys.stderr)
+        return 2
+    os.makedirs(a.dest, exist_ok=True)
+    put(os.path.join(a.dest, a.table + SUFFIX), sql)
+    put(os.path.join(a.dest, a.table + M_SUFFIX), m)
     return 0
 
 
@@ -266,6 +301,8 @@ def main():
     w.add_argument("--query", required=True, help="the Snowflake query file the lake pull runs")
     w.add_argument("--table", required=True, help="the lake table name (the CSV's stem)")
     w.add_argument("--dest", required=True, help="the CSV lake folder holding <table>.csv")
+    w.add_argument("--folder-url", help="DEST's SharePoint folder URL, which the Power Query reads")
+    w.add_argument("--local", action="store_true", help="the Power Query reads DEST with File.Contents (tests)")
     w.add_argument("--project-column", help="output column the project filter tests, e.g. PROJECT_NUMBER")
     w.add_argument("--source-label", help="how the header names the query (default: <repo>\\<path>)")
     c = sub.add_parser("check")

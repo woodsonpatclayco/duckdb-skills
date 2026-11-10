@@ -63,34 +63,44 @@ load as text, and the tool's output names each one.
 
 ### Snowflake-only lake tables: `<table>.snowflake.sql`
 
-A CSV lake table whose data comes only from Snowflake also gets `<table>.snowflake.sql` next
-to its CSV. It contains the query the lake pull runs, so a person with Snowflake access can
-pull the same table live, and optionally for only some projects, without the CSV. It is plain
-SQL with nothing else in it: a short how-to header, the query, and at the end a commented-out
-`/* WHERE lake_table.<column> IN ('<project>', '<project>') */` line. To switch the filter on,
-delete the `/*` and `*/` and list the projects. The file is separate from the table's DuckDB
-contract, which still gates the CSV.
+A CSV lake table whose data comes only from Snowflake also gets two files next to its CSV,
+so a person with Snowflake access can pull the same table live, and optionally for only some
+projects:
+
+- `<table>.snowflake.sql`: the query the lake pull runs, as plain SQL. It has a four-line
+  header, the query, and at the end a commented-out
+  `/* WHERE lake_table.<column> IN ('<project>', '<project>') */` line that switches on a
+  project filter.
+- `<table>.snowflake.pq.m`: the Power Query to paste into a Blank Query's Advanced Editor. It
+  reads the `.sql` from the SharePoint folder and runs it with
+  `Odbc.Query("dsn=Snowflake", ...)`. Its `Projects = {}` line is the project filter
+  parameter. List project numbers there, e.g. `{"10002556", "10005145"}`, and it switches the
+  filter line on. If the file has no filter line, a non-empty list stops the refresh with an
+  error rather than returning every project. The template is
+  `${CLAUDE_PLUGIN_ROOT}/skills/convert-file/snowflake-sql-sharepoint.m`.
+
+Both are separate from the table's DuckDB contract, which still gates the CSV.
 
 ```bash
 py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/snowflake_pq_sql.py" write --query <the pull's .sql> \
-  --table <table> --dest <CSV lake folder> [--project-column PROJECT_NUMBER]
+  --table <table> --dest <CSV lake folder> --folder-url '<that folder's SharePoint URL>' \
+  [--project-column PROJECT_NUMBER]
 py -3.12 "${CLAUDE_PLUGIN_ROOT}/tools/snowflake_pq_sql.py" check --file <dest>\<table>.snowflake.sql \
   [--query <the pull's .sql>] [--projects 10002556,10005145]
 ```
 
-`write` builds the file from the same query file the pull runs, so the two never drift apart.
-It rewrites the file only when its text changes. It refuses (exit 2) a query that Power Query
-could not run as one statement: a `SET` or `USE` first, two statements, or a `$variable`.
-`check` runs the file in Snowflake and prints its row count. With `--query`, it says whether
-the file returns exactly the source query's rows. With `--projects`, it switches the filter on
-the way the comment tells a person to, and says whether the result is exactly the full
+`write` builds the `.sql` from the same query file the pull runs, so the two never drift
+apart. It rewrites each file only when its text changes. It refuses (exit 2) a query that could
+not run as one statement: a `SET` or `USE` first, two statements, or a `$variable`.
+`--local` in place of `--folder-url` makes the M read the folder with `File.Contents`; that is
+for tests only. `check` runs the `.sql` in Snowflake and prints its row count. With
+`--query`, it says whether the file returns exactly the source query's rows. With
+`--projects`, it switches the filter on and says whether the result is exactly the full
 result's rows for those projects.
 
-Excel on Clayco laptops has **no built-in Snowflake connector**: `Snowflake.Databases` fails
-with "matches no exports". The file is pasted into Data > Get Data > From Other Sources >
-From ODBC > the `Snowflake` DSN > Advanced options > SQL statement. Power BI's Snowflake
-connector takes the same text. Column names come back upper case (the lake CSVs have them
-lower case), and these rows have not been through the contract's checks.
+The M uses ODBC because Excel on Clayco laptops has **no built-in Snowflake connector**:
+`Snowflake.Databases` fails with "matches no exports". Column names come back upper case (the
+lake CSVs have them lower case), and these rows have not been through the contract's checks.
 
 ## Step 2 — Convert
 

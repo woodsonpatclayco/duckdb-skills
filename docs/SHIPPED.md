@@ -2,6 +2,42 @@
 
 Newest first. Earlier work is recorded under `docs/tasks/<date>-<slug>/SHIPPED.md`.
 
+## 2026-11-10 — The `.snowflake.sql` comes with its Power Query (v0.7.1)
+
+**The feature:** `snowflake_pq_sql.py write` also writes `<table>.snowflake.pq.m`, the M a
+query needs to use the `.sql` file. You paste it into a Blank Query. It reads the `.sql` from
+the SharePoint lake folder and runs it through `Odbc.Query("dsn=Snowflake", ...)`. Its
+`Projects = {}` line is the project filter parameter: list project numbers there to switch on
+the `.sql`'s filter line. Nobody needs to set up the ODBC source in Excel's dialogs any more.
+The `.sql` header no longer explains that setup; it names the `.pq.m` instead.
+
+**Before / after:** before, the `.sql` header told people to paste the whole file into
+From ODBC > Advanced options > SQL statement, and to edit the SQL by hand to filter projects.
+After, a hidden Excel runs the generated `job_milestone.snowflake.pq.m` byte for byte and gets
+2,036 rows and 31 columns, the same as the Snowflake check. The same M with only its Projects
+line changed to `{"10002556", "10005145"}` gets 8 rows, the count the check proved is exactly
+those two jobs' rows.
+
+**Prove it:**
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File tests\prove-snowflake-pq-sql.ps1
+
+Expect `RESULT: PASS`, with `unchanged` for both files on the second write, `SAME` on both
+Snowflake comparisons, and Excel's 2,036 and 8.
+
+**What deliberately did not change:**
+- **The SharePoint source isn't exercised.** The proof writes with `--local`, which swaps
+  only the two `SharePoint.Files` lines for `File.Contents`. Those two lines are the same ones
+  the lake's CSV `.pq.m` files already use against the real folder.
+- **Formula.Firewall can't be reproduced here.** This Excel ignores privacy levels, and the M
+  reads SharePoint and passes the text to ODBC. If a colleague's refresh stops with
+  Formula.Firewall, the M's header says which setting to change (Query Options > Current
+  Workbook > Privacy > Ignore the Privacy Levels).
+- **The M doesn't rename columns to lower case** to match the CSV. A workbook moved from the
+  CSV to this query still needs its column steps renamed.
+- **Still no project exporter calls `write`,** and nothing was written to the SharePoint lake.
+  `write` now needs `--folder-url` (or `--local`).
+
 ## 2026-11-09 — Snowflake-only lake tables get a paste-ready `.snowflake.sql` (v0.7.0)
 
 **The feature:** a CSV lake table whose data comes only from Snowflake can have
